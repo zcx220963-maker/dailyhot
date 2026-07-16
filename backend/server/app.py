@@ -30,8 +30,8 @@ sys.path.insert(0, os.path.abspath(os.path.dirname(os.path.dirname(__file__))))
 
 from server.websocket_manager import WebSocketManager
 from server.server_utils import (
-    get_config_dict, sanitize_filename,
-    update_environment_variables, handle_file_upload, handle_file_deletion,
+    sanitize_filename,
+    handle_file_upload, handle_file_deletion,
     execute_multi_agents, handle_websocket_communication
 )
 from server.agent_discovery import build_agent_discovery_document
@@ -147,14 +147,6 @@ app.add_middleware(
 )
 
 # Use default JSON response class
-
-# Mount static files for frontend
-# Get the absolute path to the frontend directory
-frontend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend"))
-
-# Mount static directories
-app.mount("/static", StaticFiles(directory=os.path.join(frontend_dir, "static")), name="static")
-app.mount("/site", StaticFiles(directory=frontend_dir), name="site")
 
 # WebSocket manager
 manager = WebSocketManager()
@@ -513,19 +505,6 @@ async def research_report_chat(research_id: str, request: Request):
     except Exception as e:
         logger.error(f"Error in research report chat: {str(e)}", exc_info=True)
         return {"error": str(e)}
-
-@app.put("/api/reports/{research_id}")
-async def update_report(research_id: str, request: Request):
-    """Update a specific research report by ID - no database configured."""
-    logger.debug(f"Update requested for report {research_id} - no database configured, not persisted")
-    return {"success": True, "id": research_id}
-
-@app.delete("/api/reports/{research_id}")
-async def delete_report(research_id: str):
-    """Delete a specific research report by ID - no database configured."""
-    logger.debug(f"Delete requested for report {research_id} - no database configured, nothing to delete")
-    return {"success": True, "id": research_id}
-
 
 # ============= 热榜研究 API =============
 

@@ -198,12 +198,6 @@ async def handle_start_command(websocket, data: str, manager):
         asyncio.ensure_future(_notify_feishu_ws(report, task))
 
 
-async def handle_human_feedback(data: str):
-    feedback_data = json.loads(data[14:])  # Remove "human_feedback" prefix
-    print(f"Received human feedback: {feedback_data}")
-    # TODO: Add logic to forward the feedback to the appropriate agent or update the research state
-
-
 async def handle_chat_command(websocket, data: str):
     """Handle chat command from WebSocket."""
     try:
@@ -299,34 +293,6 @@ async def generate_report_files(report: str, filename: str) -> Dict[str, str]:
 
 async def send_file_paths(websocket, file_paths: Dict[str, str]):
     await websocket.send_json({"type": "path", "output": file_paths})
-
-
-def get_config_dict(
-    langchain_api_key: str, openai_api_key: str, tavily_api_key: str,
-    google_api_key: str, google_cx_key: str, bing_api_key: str,
-    searchapi_api_key: str, serpapi_api_key: str, serper_api_key: str, searx_url: str
-) -> Dict[str, str]:
-    return {
-        "LANGCHAIN_API_KEY": langchain_api_key or os.getenv("LANGCHAIN_API_KEY", ""),
-        "OPENAI_API_KEY": openai_api_key or os.getenv("OPENAI_API_KEY", ""),
-        "TAVILY_API_KEY": tavily_api_key or os.getenv("TAVILY_API_KEY", ""),
-        "GOOGLE_API_KEY": google_api_key or os.getenv("GOOGLE_API_KEY", ""),
-        "GOOGLE_CX_KEY": google_cx_key or os.getenv("GOOGLE_CX_KEY", ""),
-        "BING_API_KEY": bing_api_key or os.getenv("BING_API_KEY", ""),
-        "SEARCHAPI_API_KEY": searchapi_api_key or os.getenv("SEARCHAPI_API_KEY", ""),
-        "SERPAPI_API_KEY": serpapi_api_key or os.getenv("SERPAPI_API_KEY", ""),
-        "SERPER_API_KEY": serper_api_key or os.getenv("SERPER_API_KEY", ""),
-        "SEARX_URL": searx_url or os.getenv("SEARX_URL", ""),
-        "LANGCHAIN_TRACING_V2": os.getenv("LANGCHAIN_TRACING_V2", "true"),
-        "DOC_PATH": os.getenv("DOC_PATH", "./my-docs"),
-        "RETRIEVER": os.getenv("RETRIEVER", ""),
-        "EMBEDDING_MODEL": os.getenv("OPENAI_EMBEDDING_MODEL", "")
-    }
-
-
-def update_environment_variables(config: Dict[str, str]):
-    for key, value in config.items():
-        os.environ[key] = value
 
 
 async def handle_file_upload(file, DOC_PATH: str) -> Dict[str, str]:

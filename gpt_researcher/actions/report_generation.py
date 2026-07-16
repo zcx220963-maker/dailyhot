@@ -112,51 +112,6 @@ async def write_conclusion(
     return ""
 
 
-async def summarize_url(
-    url: str,
-    content: str,
-    role: str,
-    config: Config,
-    websocket=None,
-    cost_callback: callable = None,
-    **kwargs
-) -> str:
-    """
-    Summarize the content of a URL.
-
-    Args:
-        url (str): The URL to summarize.
-        content (str): The content of the URL.
-        role (str): The role of the agent.
-        config (Config): Configuration object.
-        websocket: WebSocket connection for streaming output.
-        cost_callback (callable, optional): Callback for calculating LLM costs.
-
-    Returns:
-        str: The summarized content.
-    """
-    try:
-        summary = await create_chat_completion(
-            model=config.smart_llm_model,
-            messages=[
-                {"role": "system", "content": f"{role}"},
-                {"role": "user", "content": f"Summarize the following content from {url}:\n\n{content}"},
-            ],
-            temperature=0.25,
-            llm_provider=config.smart_llm_provider,
-            stream=True,
-            websocket=websocket,
-            max_tokens=config.smart_token_limit,
-            llm_kwargs=config.llm_kwargs,
-            cost_callback=cost_callback,
-            **kwargs
-        )
-        return summary
-    except Exception as e:
-        logger.error(f"Error in summarizing URL: {e}")
-    return ""
-
-
 async def generate_draft_section_titles(
     query: str,
     current_subtopic: str,
