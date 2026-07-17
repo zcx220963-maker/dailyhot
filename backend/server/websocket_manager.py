@@ -214,22 +214,6 @@ async def run_agent(task, report_type, report_source, source_urls, document_urls
         )
         report = await researcher.run()
 
-        # 报告生成后推送到飞书
-        try:
-            from gpt_researcher.actions.notifiers import send_report_to_feishu
-            from hot_research.daily_hot_api import PLATFORM_NAME_MAP
-            primary_names = [PLATFORM_NAME_MAP.get(c, c) for c in primary_codes]
-            title = f"📊 {task} ({', '.join(primary_names)})"
-            await asyncio.get_event_loop().run_in_executor(
-                None, send_report_to_feishu, report, title
-            )
-            await stream_output("logs", "feishu",
-                "📨 已推送到飞书",
-                websocket=logs_handler, output_log=True,
-            )
-        except Exception as e:
-            logger.warning(f"飞书推送失败: {e}")
-
     elif report_type == ReportType.DetailedReport.value:
         researcher = DetailedReport(
             query=task,

@@ -2,12 +2,11 @@ import logging
 import os
 import uuid
 import json
+import numpy as np
 from fastapi import WebSocket
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import InMemoryVectorStore
-from gpt_researcher.memory import Memory
 from gpt_researcher.config.config import Config
 from gpt_researcher.utils.llm import create_chat_completion
 from gpt_researcher.utils.tools import create_chat_completion_with_tools, create_search_tool
@@ -57,53 +56,109 @@ class ChatAgentWithMemory:
         report: str,
         config_path="default",
         headers=None,
-        vector_store=None
+        vector_store=None,
+        hot_items=None,
     ):
         self.report = report
         self.headers = headers
         self.config = Config(config_path)
-        self.vector_store = vector_store
         self.retriever = None
         self.search_metadata = None
-        
+        self.hot_items = hot_items or []
+
+        # RAG 相关
+        self._chunks: List[str] = []
+        self._embeddings: Optional[np.ndarray] = None
+        self._embed_fn = None
+
         # DuckDuckGo search (free, no API key needed)
         self._ddgs = None
-        
-        # Process document and create vector store if not provided
-        if not self.vector_store and False:
-            self._setup_vector_store()
-    
-    def _setup_vector_store(self):
-        """Setup vector store for document retrieval"""
-        # Process document into chunks
-        documents = self._process_document(self.report)
-        
-        # Create unique thread ID
-        self.thread_id = str(uuid.uuid4())
-        
-        # Setup embeddings and vector store
-        cfg = Config()
-        self.embedding = Memory(
-            cfg.embedding_provider,
-            cfg.embedding_model,
-            **cfg.embedding_kwargs
-        ).get_embeddings()
-        
-        # Create vector store and retriever
-        self.vector_store = InMemoryVectorStore(self.embedding)
-        self.vector_store.add_texts(documents)
-        self.retriever = self.vector_store.as_retriever(k=4)
-        
-    def _process_document(self, report):
-        """Split Report into Chunks"""
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1024,
-            chunk_overlap=20,
-            length_function=len,
-            is_separator_regex=False,
+
+        # 初始化 RAG（切片 + 嵌入）
+        self._setup_rag()
+
+    def _hot_items_prompt(self) -> str:
+        """生成热榜条目索引表 + 追问格式指引（仅当 hot_items 非空时）。"""
+        if not self.hot_items:
+            return ""
+        idx_lines = []
+        for i, item in enumerate(self.hot_items, 1):
+            hot_str = item.get("hot", "")
+            hot_display = f" (🔥{hot_str})" if hot_str else ""
+            url = item.get("url", "")
+            url_display = f"  {url}" if url else ""
+            idx_lines.append(
+                f"{i}. [{item.get('platform', '')} #{item.get('rank', i)}] "
+                f"{item.get('title', '')}{hot_display}{url_display}"
+            )
+        idx_table = "\n".join(idx_lines)
+        return (
+            "## 热榜条目索引（用户可能用「第N个」「XX平台那条」等方式指代）\n\n"
+            f"{idx_table}\n\n"
+            "当用户针对某条热点追问时：\n"
+            "1. 先根据索引表确定用户指的是哪条（注意区分平台 + 排名）\n"
+            "2. 用 quick_search 联网搜索该标题的最新信息（如事件进展、官方回应、网友评论）\n"
+            "3. 结合报告中的已有分析，给出回答\n\n"
+            "输出格式指引：\n"
+            "- 「口播稿」：约 750 字，口语化，开场白 + 3 段主体 + 结尾互动，适合 3 分钟讲述\n"
+            "- 「深度分析」：约 500 字，带小标题，背景→现状→影响→展望\n"
+            "- 「总结」：100 字以内，3 个 bullet\n"
+            "- 其他：按用户要求"
         )
-        documents = text_splitter.split_text(report)
-        return documents
+
+    def _setup_rag(self):
+        """对报告切片 + 生成嵌入向量，存入内存供检索。"""
+        if not self.report or len(self.report.strip()) < 50:
+            return
+
+        # 1. 切片：按 Markdown 标题优先，其次固定长度
+        try:
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=800,
+                chunk_overlap=80,
+                separators=["\n## ", "\n### ", "\n\n", "\n", "。", "，", " "],
+            )
+        except TypeError:
+            # 旧版 langchain 不支持 separators
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=800,
+                chunk_overlap=80,
+            )
+        self._chunks = text_splitter.split_text(self.report)
+        if not self._chunks:
+            return
+
+        # 2. 嵌入：使用 huggingface sentence-transformers（本地模型，无需 API key）
+        try:
+            from langchain_huggingface import HuggingFaceEmbeddings
+            model_name = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+            self._embed_fn = HuggingFaceEmbeddings(model_name=model_name)
+            vectors = self._embed_fn.embed_documents(self._chunks)
+            self._embeddings = np.array(vectors, dtype=np.float32)
+            logger.info(f"RAG: 报告切成 {len(self._chunks)} 块，嵌入维度 {self._embeddings.shape[1]}")
+        except Exception as e:
+            logger.warning(f"RAG 嵌入初始化失败（将跳过 RAG，仅用索引表）: {e}")
+            self._embed_fn = None
+            self._embeddings = None
+
+    def retrieve(self, query: str, top_k: int = 4) -> str:
+        """对查询做语义检索，返回最相关的几段原文拼接。"""
+        if not self._embed_fn or self._embeddings is None or not self._chunks:
+            return ""
+        try:
+            q_vec = np.array(self._embed_fn.embed_query(query), dtype=np.float32)
+            # 余弦相似度
+            norms = np.linalg.norm(self._embeddings, axis=1) * np.linalg.norm(q_vec)
+            norms = np.where(norms == 0, 1e-9, norms)
+            sims = self._embeddings.dot(q_vec) / norms
+            top_idx = np.argsort(sims)[-top_k:][::-1]
+            selected = [self._chunks[i] for i in top_idx if sims[i] > 0.1]
+            if not selected:
+                return ""
+            return "\n\n---\n\n".join(selected)
+        except Exception as e:
+            logger.error(f"RAG 检索失败: {e}")
+            return ""
 
     def quick_search(self, query):
         """Perform a web search for current information using DuckDuckGo"""
@@ -174,48 +229,55 @@ class ChatAgentWithMemory:
 
 
     async def chat(self, messages, websocket=None):
-        """Chat with configured LLM provider (supports OpenAI, Google Gemini, Anthropic, etc.)
-        
-        Args:
-            messages: List of chat messages with role and content
-            websocket: Optional websocket for streaming responses
-        
-        Returns:
-            tuple: (str: The AI response message, dict: metadata about tool usage)
-        """
+        """Chat with configured LLM provider. 使用 RAG 按需检索报告片段，
+        不再把完整报告塞进 system prompt。"""
         try:
-            
-            # Format system prompt with the report context
-            system_prompt = f"""
-            You are GPT Researcher, an autonomous research agent created by an open source community at https://github.com/assafelovic/gpt-researcher, homepage: https://gptr.dev. 
-            To learn more about GPT Researcher you can suggest to check out: https://docs.gptr.dev.
-            
-            This is a chat about a research report that you created. Answer based on the given context and report.
-            You must include citations to your answer based on the report.
-            
-            You may use the quick_search tool when the user asks about information that might require current data 
-            not found in the report, such as recent events, updated statistics, or news. If there's no report available,
-            you can use the quick_search tool to find information online.
-            
-            You must respond in markdown format. You must make it readable with paragraphs, tables, etc when possible. 
-            Remember that you're answering in a chat not a report.
-            
-            Assume the current time is: {datetime.now()}.
-            
-            Report: {self.report}
-            
-            """
-            
-            # Format message history for OpenAI input
-            formatted_messages = []
-            
-            # Add system message first
-            formatted_messages.append({
-                "role": "system", 
-                "content": system_prompt
-            })
-            
-            # Add user/assistant message history - filter out non-essential fields
+            # 1. 取出最新一条用户消息，用于 RAG 检索
+            latest_user_msg = ""
+            for msg in reversed(messages):
+                if msg.get("role") == "user":
+                    latest_user_msg = msg.get("content", "")
+                    break
+
+            # 2. RAG：根据用户问题检索报告相关片段
+            retrieved_context = self.retrieve(latest_user_msg, top_k=4) if latest_user_msg else ""
+
+            # 3. 系统提示不再包含完整报告，只保留角色定义 + 索引表 + 输出指引
+            system_parts = [
+                "You are GPT Researcher, an autonomous research agent. ",
+                "This is a chat about a research report. Answer based on the given context and report.",
+                "",
+                "You may use the quick_search tool when the user asks about information",
+                "that might require current data not found in the report.",
+                "",
+                "You must respond in markdown format, readable with paragraphs, tables, etc.",
+                f"Assume the current time is: {datetime.now()}.",
+            ]
+            # 热榜索引（如果有）
+            hot_prompt = self._hot_items_prompt()
+            if hot_prompt:
+                system_parts.append(hot_prompt)
+
+            system_prompt = "\n".join(system_parts)
+
+            # 4. 组装消息：system +（检索到的上下文作为 assistant 前缀）+ 消息历史
+            formatted_messages = [
+                {"role": "system", "content": system_prompt}
+            ]
+
+            # 把 RAG 检索到的片段作为一条 tool_result 注入到消息历史最前面
+            # 这样 LLM 看到的不是全量报告，而是与当前问题相关的片段
+            if retrieved_context:
+                formatted_messages.append({
+                    "role": "assistant",
+                    "content": (
+                        "我已经从完整报告中检索到了以下与问题相关的段落，"
+                        "你可以基于这些内容回答。如果信息不足，可以调用 quick_search 联网搜索。\n\n"
+                        f"{retrieved_context}"
+                    )
+                })
+
+            # 原始消息历史
             for msg in messages:
                 if 'role' in msg and 'content' in msg:
                     formatted_messages.append({
@@ -224,20 +286,17 @@ class ChatAgentWithMemory:
                     })
                 else:
                     logger.warning(f"Skipping message with missing role or content: {msg}")
-            
-            # Process the chat using configured LLM provider
+
+            # 5. 调用 LLM
             ai_message, tool_calls_metadata = await self.process_chat_completion(formatted_messages)
-            
-            # Provide fallback response if message is empty
+
             if not ai_message:
-                logger.warning("No AI message content found in response, using fallback message")
-                ai_message = "I apologize, but I couldn't generate a proper response. Please try asking your question again."
-            
+                logger.warning("No AI message content found in response, using fallback")
+                ai_message = "抱歉，我没能生成回答，请换个方式提问。"
+
             logger.info(f"Generated response: {ai_message[:100]}..." if len(ai_message) > 100 else f"Generated response: {ai_message}")
-            
-            # Return both the message and any metadata about tools used
             return ai_message, tool_calls_metadata
-            
+
         except Exception as e:
             logger.error(f"Error in chat: {str(e)}", exc_info=True)
             raise

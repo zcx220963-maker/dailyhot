@@ -193,10 +193,6 @@ async def handle_start_command(websocket, data: str, manager):
     file_paths["json"] = os.path.relpath(logs_handler.log_file)
     await send_file_paths(websocket, file_paths)
 
-    # Auto-send to Feishu if configured (fire-and-forget — to avoid blocking WS response)
-    if os.getenv("FEISHU_WEBHOOK_URL") or os.getenv("FEISHU_APP_ID"):
-        asyncio.ensure_future(_notify_feishu_ws(report, task))
-
 
 async def handle_chat_command(websocket, data: str):
     """Handle chat command from WebSocket."""

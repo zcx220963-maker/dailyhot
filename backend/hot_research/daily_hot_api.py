@@ -116,6 +116,7 @@ def fetch_hot(platform_code: str, limit: int = 50) -> list[dict]:
     """获取单个平台的原始热搜列表。
 
     每个元素包含 title / hot / url 等字段。
+    对瞬时网络/API 错误自动重试 2 次（指数退避）。
     """
     limit = limit or 50
     # B站和百度走官方实时热搜接口（DailyHotApi 对这两个平台数据不准确）
@@ -123,20 +124,34 @@ def fetch_hot(platform_code: str, limit: int = 50) -> list[dict]:
         return _fetch_bilibili_square(limit)
     if platform_code == "baidu":
         return _fetch_baidu_hot(limit)
-    try:
-        resp = requests.get(
-            f"{BASE_URL}/{platform_code}", timeout=15, proxies=_proxy()
-        )
-        data = resp.json()
-        if data.get("code") == 200 or "data" in data:
-            items = data.get("data", [])
-            # 统一字段名，方便下游使用
-            for it in items:
-                if "url" not in it:
-                    it["url"] = it.get("mobileUrl", "")
-            return items[:limit]
-    except Exception as e:
-        logger.warning(f"fetch_hot({platform_code}): {e}")
+    last_err: Exception | None = None
+    for attempt in range(3):          # 1 次原始 + 2 次重试
+        try:
+            resp = requests.get(
+                f"{BASE_URL}/{platform_code}",
+                timeout=15,
+                proxies=_proxy(),
+            )
+            data = resp.json()
+            if data.get("code") == 200 or "data" in data:
+                items = data.get("data", [])
+                # 统一字段名，方便下游使用
+                for it in items:
+                    if "url" not in it:
+                        it["url"] = it.get("mobileUrl", "")
+                return items[:limit]
+        except Exception as e:
+            last_err = e
+            logger.warning(
+                "fetch_hot(%s) 第%d次失败: %s%s",
+                platform_code,
+                attempt + 1,
+                e,
+                "（将重试）" if attempt < 2 else "",
+            )
+            import time
+            time.sleep(1 * (attempt + 1))   # 1s, 2s 退避
+    logger.warning(f"fetch_hot({platform_code}) 最终失败: {last_err}")
     return []
 
 

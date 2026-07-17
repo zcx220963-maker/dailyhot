@@ -1,7 +1,7 @@
 import asyncio
 import json
 import os
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 import time
 import logging
 import sys
@@ -87,9 +87,10 @@ class ResearchRequest(BaseModel):
 
 class ChatRequest(BaseModel):
     model_config = ConfigDict(extra="allow")  # Allow extra fields in the request
-    
+
     report: str
     messages: List[Dict[str, Any]]
+    hot_items: Optional[List[Dict[str, Any]]] = None  # 结构化热榜条目（可选）
 
 
 @asynccontextmanager
@@ -342,13 +343,6 @@ async def write_report(research_request: ResearchRequest, research_id: str = Non
     docx_path = await write_md_to_word(report_information[0], research_id)
     pdf_path = await write_md_to_pdf(report_information[0], research_id)
 
-    # Auto-send to Feishu if configured (non-blocking — failures don't break report)
-    feishu_task = None
-    if os.getenv("FEISHU_WEBHOOK_URL") or os.getenv("FEISHU_APP_ID"):
-        feishu_task = asyncio.ensure_future(
-            _notify_feishu(report_information[0], research_request.task)
-        )
-
     if research_request.report_type != "multi_agents":
         report, researcher = report_information
         response = {
@@ -366,11 +360,6 @@ async def write_report(research_request: ResearchRequest, research_id: str = Non
         }
     else:
         response = { "research_id": research_id, "report": "", "docx_path": docx_path, "pdf_path": pdf_path }
-
-    # If report was NOT generated in background, wait for feishu push to complete
-    # so the user actually receives it before the function exits.
-    if feishu_task is not None and research_request.generate_in_background is False:
-        await feishu_task
 
     return response
 
@@ -406,6 +395,41 @@ async def upload_file(file: UploadFile = File(...)):
     return await handle_file_upload(file, DOC_PATH)
 
 
+@app.post("/api/cookies/upload")
+async def upload_cookies(file: UploadFile = File(...)):
+    """上传抖音/视频平台 cookies.txt"""
+    backend_dir = Path(__file__).resolve().parent.parent
+    save_path = backend_dir / "cookies.txt"
+    content = await file.read()
+    with open(save_path, "wb") as f:
+        f.write(content)
+    return JSONResponse(content={
+        "message": "Cookie 已更新",
+        "path": str(save_path),
+        "size": len(content),
+    })
+
+
+@app.get("/api/cookies/status")
+async def cookies_status():
+    """检查 cookies 文件状态"""
+    backend_dir = Path(__file__).resolve().parent.parent
+    cookie_file = backend_dir / "cookies.txt"
+    exists = cookie_file.exists()
+    mtime = None
+    size = 0
+    if exists:
+        stat = cookie_file.stat()
+        size = stat.st_size
+        mtime = stat.st_mtime
+    return JSONResponse(content={
+        "exists": exists,
+        "path": str(cookie_file),
+        "size": size,
+        "mtime": mtime,
+    })
+
+
 @app.delete("/files/{filename}")
 async def delete_file(filename: str):
     return await handle_file_deletion(filename, DOC_PATH)
@@ -438,11 +462,12 @@ async def chat(chat_request: ChatRequest):
     try:
         logger.info(f"Received chat request with {len(chat_request.messages)} messages")
 
-        # Create chat agent with the report
+        # Create chat agent with the report (and optional hot_items for hot-list follow-up)
         chat_agent = ChatAgentWithMemory(
             report=chat_request.report,
             config_path="default",
-            headers=None
+            headers=None,
+            hot_items=chat_request.hot_items,
         )
 
         # Process the chat and get response with metadata
@@ -711,3 +736,66 @@ async def hot_quick_api(req: HotQuickRequest):
     except Exception as e:
         logger.error(f"hot_quick failed: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+# ============= 追问回复导出 API =============
+
+class ChatExportRequest(BaseModel):
+    content: str                       # markdown 内容
+    format: str = "md"                 # "md" | "pdf" | "docx"
+    filename: str = "AI回复"           # 下载文件名（不含扩展名）
+
+
+@app.post("/api/chat/export")
+async def chat_export(req: ChatExportRequest):
+    """把追问回复导出为 Markdown / PDF / DOCX。"""
+    try:
+        from utils import write_md_to_word, write_md_to_pdf
+        import uuid
+
+        safe_name = sanitize_filename(req.filename) or "AI回复"
+        research_id = f"chat-export-{uuid.uuid4().hex[:8]}"
+
+        if req.format == "pdf":
+            path = await write_md_to_pdf(req.content, research_id)
+            return {"path": path, "mime": "application/pdf"}
+        elif req.format == "docx":
+            path = await write_md_to_word(req.content, research_id)
+            return {"path": path, "mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
+        else:
+            # 直接返回 markdown 文本，前端生成 .md 文件下载
+            return {"content": req.content, "filename": f"{safe_name}.md"}
+    except Exception as e:
+        logger.error(f"chat_export failed: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+# ============= 追问回复转发飞书 API =============
+
+
+class ChatFeishuRequest(BaseModel):
+    content: str                       # markdown 内容
+    title: str = "AI 追问回复"         # 飞书消息标题
+
+
+@app.post("/api/chat/feishu")
+async def chat_feishu(req: ChatFeishuRequest):
+    """把追问回复推送到飞书群。
+
+    需要 .env 里配置 FEISHU_WEBHOOK_URL 或 (FEISHU_APP_ID + FEISHU_APP_SECRET)。
+    """
+    try:
+        loop = asyncio.get_running_loop()
+        ok = await loop.run_in_executor(
+            None, send_report_to_feishu, req.content, req.title, "gpt-researcher-chat"
+        )
+        if ok:
+            return {"ok": True, "message": "已成功推送到飞书"}
+        else:
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "飞书推送失败，请检查 .env 中 FEISHU_WEBHOOK_URL 或 FEISHU_APP_ID / FEISHU_APP_SECRET 配置"},
+            )
+    except Exception as e:
+        logger.error(f"chat_feishu failed: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})

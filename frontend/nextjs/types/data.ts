@@ -75,6 +75,16 @@ export interface ChatMessage {
   metadata?: any; // For storing search results and other contextual information
 }
 
+export interface HotItem {
+  platform: string;
+  rank: number;
+  title: string;
+  hot: string;
+  url: string;
+  summary: string;
+  related_links: { platform: string; title: string; url: string }[];
+}
+
 export interface ResearchHistoryItem {
   id: string;
   question: string;

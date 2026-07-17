@@ -8,8 +8,10 @@
 主干平台由上游 intent_agent 识别后传入，本模块不再做关键词匹配。
 """
 import asyncio
+import json as json_module
 import logging
 import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -44,6 +46,27 @@ from langchain_core.output_parsers import StrOutputParser
 
 
 logger = logging.getLogger(__name__)
+
+
+def _ensure_file_logging():
+    """确保日志同时写入文件（后端 stdout 在 uvicorn reload 模式下不可见）。"""
+    log_dir = _BACKEND_DIR / "logs"
+    log_dir.mkdir(exist_ok=True)
+    log_file = log_dir / "hot_list_report.log"
+    # 避免重复添加
+    root = logging.getLogger()
+    for h in root.handlers:
+        if isinstance(h, logging.FileHandler) and getattr(h, "baseFilename", "").endswith("hot_list_report.log"):
+            return
+    fh = logging.FileHandler(log_file, encoding="utf-8")
+    fh.setLevel(logging.DEBUG)
+    fmt = logging.Formatter("[%(asctime)s] %(name)s %(levelname)s: %(message)s")
+    fh.setFormatter(fmt)
+    root.addHandler(fh)
+    root.setLevel(logging.DEBUG)
+
+
+_ensure_file_logging()
 
 # ---------------------------------------------------------------------------
 # LLM 实例化（统一用 LangChain 风格，复用 langchain_agent.py 的工厂）
@@ -309,15 +332,32 @@ class HotListReport:
                 return (
                     meta["platform_name"], meta["rank"], meta["title"],
                     meta["hot"], summary, meta["related_links"],
+                    meta.get("url", ""),
                 )
 
-        analyses: list[tuple] = list(await asyncio.gather(
-            *[_bounded_summarize(m) for m in tasks_meta],
-            return_exceptions=True,
-        ))
-        # 过滤掉异常结果
-        analyses = [a for a in analyses if not isinstance(a, Exception)]
-        # 按平台和排名排序（gather 不保证顺序）
+        # 使用 as_completed 实现流式推送：每分析完一条就立即推给前端
+        analyses: list[tuple] = []
+        for coro in asyncio.as_completed(
+            [_bounded_summarize(m) for m in tasks_meta]
+        ):
+            try:
+                result = await coro
+                analyses.append(result)
+                # 流式推送单条分析结果给前端（logs 类型，前端直接渲染）
+                platform_name, rank, title, hot, summary, related, url = result
+                related_str = ""
+                if related:
+                    related_str = "\n" + "\n".join(
+                        [f"  ↳ {r[0]}: {r[1]}" for r in related]
+                    )
+                await stream_output(
+                    "logs", "hot_item",
+                    f"[{platform_name} #{rank}] {title} (🔥{hot})\n{summary}{related_str}",
+                    self.websocket, True,
+                )
+            except Exception as e:
+                logger.warning(f"单条热搜分析失败，跳过: {e}")
+        # 按平台和排名排序
         analyses.sort(key=lambda a: (a[0], a[1]))
 
         # ---- 第三阶段：汇总引言 + 趋势总结 ----
@@ -328,10 +368,32 @@ class HotListReport:
         )
         report = await self._build_report(analyses, primary_codes)
 
-        # ---- 推送完整报告 ----
+        # ---- 构建结构化 hot_items（供追问聊天精准定位）----
+        hot_items = [
+            {
+                "platform": platform_name,
+                "rank": rank,
+                "title": title,
+                "hot": hot,
+                "url": url or "",
+                "summary": summary[:300],
+                "related_links": [
+                    {"platform": s, "title": t, "url": u}
+                    for s, t, u in (related_links or [])
+                ],
+            }
+            for platform_name, rank, title, hot, summary, related_links, url in analyses
+        ]
+
+        # 保存到实例属性（供 MCP 等非 WebSocket 场景读取）
+        self.hot_items = hot_items
+        self.analyses = analyses
+
+        # ---- 推送完整报告（附带结构化 metadata）----
         await stream_output(
             "report", "report_complete", report,
             self.websocket, True,
+            metadata={"hot_items": hot_items},
         )
         return report
 
@@ -386,7 +448,7 @@ class HotListReport:
 
         # 拼接所有单条分析为 buffer
         buffer_parts = []
-        for platform_name, rank, title, hot, summary, related in analyses:
+        for platform_name, rank, title, hot, summary, related, url in analyses:
             heat_str = f" 🔥{hot}" if hot else ""
             buffer_parts.append(f"**{platform_name} #{rank}: {title}**{heat_str}\n{summary}")
         buffer = "\n\n".join(buffer_parts)
@@ -436,10 +498,12 @@ class HotListReport:
         ]
 
         # 逐条分析小节
-        for platform_name, rank, title, hot, summary, related_links in analyses:
+        for platform_name, rank, title, hot, summary, related_links, url in analyses:
             heat_str = f" 🔥{hot}" if hot else ""
             report_lines.append(f"### {rank}. {title}{heat_str}")
             report_lines.append(f"*平台: {platform_name}*")
+            if url:
+                report_lines.append(f"*链接: [{title}]({url})*")
             report_lines.append("")
             report_lines.append(summary)
 

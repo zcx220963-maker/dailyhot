@@ -1,4 +1,5 @@
 import React from 'react';
+import { toast } from "react-hot-toast";
 import {getHost} from '../../helpers/getHost'
 
 interface AccessReportProps {
@@ -16,6 +17,28 @@ interface AccessReportProps {
 
 const AccessReport: React.FC<AccessReportProps> = ({ accessData, chatBoxSettings, report, onShareClick }) => {
   const host = getHost();
+
+  const forwardToFeishu = async () => {
+    try {
+      const res = await fetch(`${host}/api/chat/feishu`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          content: report,
+          title: '研究分析报告',
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.ok) {
+        toast.success(data.message || '已推送到飞书');
+      } else {
+        throw new Error(data.error || '飞书推送失败');
+      }
+    } catch (err: any) {
+      console.error('Feishu forward failed:', err);
+      toast.error(err.message || '飞书推送失败');
+    }
+  };
 
   const getReportLink = (dataType: 'pdf' | 'docx' | 'json'): string => {
     // Early return if path is not available
@@ -100,6 +123,18 @@ const AccessReport: React.FC<AccessReportProps> = ({ accessData, chatBoxSettings
               分享报告
             </button>
           )}
+
+          <button
+            onClick={forwardToFeishu}
+            className="bg-green-600 text-white font-medium uppercase text-sm px-6 py-3 rounded-lg shadow-md hover:shadow-lg hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-green-500/50 transform hover:scale-105 transition-all duration-200 flex items-center gap-2"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"></path>
+              <polyline points="16 6 12 2 8 6"></polyline>
+              <line x1="12" y1="2" x2="12" y2="15"></line>
+            </svg>
+            转发飞书
+          </button>
         </div>
       </div>
     </div>

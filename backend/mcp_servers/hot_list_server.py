@@ -1,27 +1,33 @@
-"""热榜 MCP 服务器 —— 支持动态平台配置。
+"""热榜 MCP 服务器 —— 支持 stdio / HTTP 两种模式。
 
 平台来源（优先级从高到低）:
   1. 环境变量 HOT_PLATFORMS_JSON —— 前端传入的自定义平台列表
   2. 内置 PLATFORMS —— 默认9平台
 
-正文抓取策略：
-  MCP 仅返回标题 + URL + 热度，不爬正文（快速返回）。
-  正文由 HotListReport 在分析阶段按需并发抓取（asyncio.gather + Semaphore）。
+工具分类:
+  原始数据工具:  get_{code}_hot, get_all_hot_list, list_hot_platforms
+  Agent 工具:   generate_hot_report (完整报告), chat_about_hot_report (追问)
 
-启动方式（stdio）:
-    python -m backend.mcp_servers.hot_list_server
+启动方式:
+    本地 Agent（stdio）:    python backend/mcp_servers/hot_list_server.py --transport stdio
+    外部 Agent（HTTP）:     python backend/mcp_servers/hot_list_server.py --transport http --port 8002
 """
 
 import sys
 import os
 import json
 import logging
+import asyncio
+import argparse
 from pathlib import Path
+from typing import Any
 
-# backend/ 加入 sys.path
+# backend/ 和项目根目录加入 sys.path
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
-if str(_BACKEND_DIR) not in sys.path:
-    sys.path.insert(0, str(_BACKEND_DIR))
+_PROJECT_DIR = _BACKEND_DIR.parent
+for _p in (_BACKEND_DIR, _PROJECT_DIR):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
 from fastmcp import FastMCP
 
@@ -136,7 +142,7 @@ def _build_server():
     """根据平台配置构建 MCP 服务器。"""
     platforms = _get_platforms()
 
-    # 注册每个平台的 tool
+    # ── 原始数据工具（快速返回，仅标题+URL） ──────────────────────
     for _code, _name, _default_n, _readable in platforms:
         _registered = _make_tool(_code, _name, readable=_readable)
         mcp.tool(
@@ -164,11 +170,153 @@ def _build_server():
             ensure_ascii=False,
         )
 
+    # ── Agent 工具（完整报告生成 + 追问） ─────────────────────────
+
+    @mcp.tool(
+        name="generate_hot_report",
+        description=(
+            "根据用户自然语言查询，自动完成热榜报告生成的完整流程："
+            "意图识别 → 抓取全平台热榜 → 关键词匹配辅助平台 → 爬取正文 → "
+            "LLM 逐条分析 → 生成 Markdown 报告。"
+            "输入示例: '今日抖音热榜' 或 '抖音+B站科技热点' 或 '今天全网热搜'。"
+            "返回: {ok, report, hot_items, error}"
+        ),
+    )
+    async def generate_hot_report(query: str) -> str:
+        """外部 Agent 调用 —— 传入自然语言，返回完整热榜报告。"""
+        try:
+            # 1. 意图识别
+            from hot_research.intent_agent import recognize_intent
+            intent = await recognize_intent(query)
+            if not intent.get("is_hot_list"):
+                return json.dumps({
+                    "ok": False,
+                    "error": "意图识别判定非热榜查询",
+                    "intent": intent,
+                }, ensure_ascii=False)
+
+            primary_codes = intent.get("primary_codes", [])
+            if not primary_codes:
+                primary_codes = [p[0] for p in platforms]
+
+            # 2. 抓取全平台原始数据
+            all_raw_data: dict[str, list[dict]] = {}
+            for code, name, _, _ in platforms:
+                try:
+                    all_raw_data[code] = fetch_hot(code, 30)
+                except Exception as e:
+                    logger.warning(f"抓取 {name}({code}) 失败: {e}")
+                    all_raw_data[code] = []
+
+            # 3. 构造一个 dummy websocket（不推前端，只收集日志）
+            class _DummyWS:
+                async def send_json(self, data): pass
+            dummy_ws = _DummyWS()
+
+            # 4. 跑完整报告生成
+            from report_type.hot_list_report.hot_list_report import HotListReport
+            agent = HotListReport(
+                query=query,
+                all_raw_data=all_raw_data,
+                primary_codes=primary_codes,
+                websocket=dummy_ws,
+            )
+            report = await agent.run()
+
+            # 5. 提取 hot_items（从 agent.analyses 结构化）
+            hot_items = []
+            for platform_name, rank, title, hot, summary, related_links, url in agent.analyses:
+                hot_items.append({
+                    "platform": platform_name,
+                    "rank": rank,
+                    "title": title,
+                    "hot": hot,
+                    "url": url or "",
+                    "summary": summary[:300],
+                    "related_links": [
+                        {"platform": s, "title": t, "url": u}
+                        for s, t, u in (related_links or [])
+                    ],
+                })
+
+            return json.dumps({
+                "ok": True,
+                "report": report,
+                "hot_items": hot_items,
+                "primary_codes": primary_codes,
+            }, ensure_ascii=False)
+
+        except Exception as e:
+            logger.exception(f"generate_hot_report 失败: {e}")
+            return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
+
+    @mcp.tool(
+        name="chat_about_hot_report",
+        description=(
+            "对已生成的热榜报告进行追问。"
+            "输入: question（追问内容）+ report（报告文本）+ hot_items（结构化索引，可选）。"
+            "输出: {ok, answer, error}"
+            "示例问题: '第二条详细说说'、'写个口播稿'、'B站那条关于XX的'"
+        ),
+    )
+    async def chat_about_hot_report(
+        question: str,
+        report: str = "",
+        hot_items: list[dict[str, Any]] | None = None,
+    ) -> str:
+        """外部 Agent 调用 —— 追问热榜报告。"""
+        try:
+            from chat.chat import ChatAgentWithMemory
+            agent = ChatAgentWithMemory(
+                report=report,
+                config_path="default",
+                headers=None,
+                hot_items=hot_items or [],
+            )
+            messages = [{"role": "user", "content": question}]
+            answer, _tool_calls = await agent.chat(messages)
+            return json.dumps({"ok": True, "answer": answer}, ensure_ascii=False)
+        except Exception as e:
+            logger.exception(f"chat_about_hot_report 失败: {e}")
+            return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
+
     return platforms
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="热榜 MCP 服务器 —— 支持 stdio / HTTP 两种模式")
+    parser.add_argument(
+        "--transport", "-t",
+        choices=["stdio", "http"],
+        default="stdio",
+        help="传输协议: stdio（本地进程）| http（外部 Agent 调用）",
+    )
+    parser.add_argument(
+        "--port", "-p",
+        type=int,
+        default=8002,
+        help="HTTP 模式监听端口（默认 8002）",
+    )
+    parser.add_argument(
+        "--host",
+        default="0.0.0.0",
+        help="HTTP 模式监听地址（默认 0.0.0.0，外网可访问）",
+    )
+    args = parser.parse_args()
+
     platforms = _build_server()
-    logger.info(f"🔥 热榜 MCP 服务器启动（stdio 模式）")
+    logger.info(f"🔥 热榜 MCP 服务器启动")
     logger.info(f"   已注册 {len(platforms)} 个平台: {[p[1] for p in platforms]}")
-    mcp.run(transport="stdio")
+
+    if args.transport == "stdio":
+        logger.info(f"   模式: stdio（本地进程通信）")
+        mcp.run(transport="stdio")
+
+    elif args.transport == "http":
+        logger.info(f"   模式: HTTP（MCP Streamable HTTP）")
+        logger.info(f"   地址: http://{args.host}:{args.port}/mcp")
+        mcp.run(
+            transport="streamable-http",
+            host=args.host,
+            port=args.port,
+        )

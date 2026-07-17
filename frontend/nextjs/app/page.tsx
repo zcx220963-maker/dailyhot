@@ -31,6 +31,7 @@ export default function Home() {
   const [chatPromptValue, setChatPromptValue] = useState("");
   const [showResult, setShowResult] = useState(false);
   const [answer, setAnswer] = useState("");
+  const [hotItems, setHotItems] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [isInChatMode, setIsInChatMode] = useState(false);
   const [chatBoxSettings, setChatBoxSettings] = useState<ChatBoxSettings>(() => {
@@ -122,7 +123,8 @@ export default function Home() {
     setAnswer,
     setLoading,
     setShowHumanFeedback,
-    setQuestionForHuman
+    setQuestionForHuman,
+    setHotItems
   ));
   
   // Use the reference to access websocket functions
@@ -183,6 +185,7 @@ export default function Home() {
           body: JSON.stringify({
             messages: [{ role: 'user', content: message }],
             report: answer || '',
+            hot_items: hotItems,
           }),
         });
         
@@ -270,7 +273,8 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           report: answer || "",
-          messages: formattedMessages
+          messages: formattedMessages,
+          hot_items: hotItems,
         }),
       });
       
@@ -596,7 +600,8 @@ export default function Home() {
           messages: [userMessage],
           report: answer || '',
           report_source: chatBoxSettings.report_source || 'web',
-          tone: chatBoxSettings.tone || 'Objective'
+          tone: chatBoxSettings.tone || 'Objective',
+          hot_items: hotItems,
         }),
         // Set reasonable timeout
         signal: AbortSignal.timeout(20000) // 20-second timeout

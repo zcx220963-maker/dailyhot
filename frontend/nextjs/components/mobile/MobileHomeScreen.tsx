@@ -136,14 +136,14 @@ export default function MobileHomeScreen({
       <div className="pt-10 px-6 text-center mb-8">
         <div className="flex justify-center mb-3">
           <img
-            src="/img/gptr-logo.png"
-            alt="GPT Researcher"
+            src="/img/dailyhot-logo.svg"
+            alt="DailyHot"
             width={60}
             height={60}
             className="rounded-xl"
           />
         </div>
-        <p className="text-gray-400 text-sm">GPT Researcher — 你的 AI 研究助手，即时获取洞见、深度调研</p>
+        <p className="text-gray-400 text-sm">DailyHot — 多平台热榜报告生成器，自动抓取并分析热点趋势</p>
       </div>
 
       {/* Search Box */}

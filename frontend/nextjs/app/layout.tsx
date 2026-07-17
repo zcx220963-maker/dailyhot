@@ -1,19 +1,16 @@
 import type { Metadata } from "next";
-import { Lexend } from "next/font/google";
 import PlausibleProvider from "next-plausible";
 import { GoogleAnalytics } from '@next/third-parties/google'
 import { ResearchHistoryProvider } from "@/hooks/ResearchHistoryContext";
 import "./globals.css";
 import Script from 'next/script';
 
-const inter = Lexend({ subsets: ["latin"] });
-
-let title = "GPT Researcher";
+let title = "DailyHot";
 let description =
-  "LLM based autonomous agent that conducts local and web research on any topic and generates a comprehensive report with citations.";
-let url = "https://github.com/assafelovic/gpt-researcher";
-let ogimage = "/favicon.ico";
-let sitename = "GPT Researcher";
+  "多平台热榜报告生成器，自动抓取抖音、今日头条、B站等平台热榜并生成深度分析报告";
+let url = "http://localhost:3000";
+let ogimage = "/img/dailyhot-logo.svg";
+let sitename = "DailyHot";
 
 export const metadata: Metadata = {
   metadataBase: new URL(url),
@@ -21,8 +18,8 @@ export const metadata: Metadata = {
   description,
   manifest: '/manifest.json',
   icons: {
-    icon: "/img/gptr-black-logo.png",
-    apple: '/img/gptr-black-logo.png',
+    icon: "/img/dailyhot-logo.svg",
+    apple: '/img/dailyhot-logo.svg',
   },
   appleWebApp: {
     capable: true,
@@ -66,10 +63,10 @@ export default function RootLayout({
         <GoogleAnalytics gaId={process.env.NEXT_PUBLIC_GA_MEASUREMENT_ID!} />
         <meta name="apple-mobile-web-app-capable" content="yes" />
         <meta name="apple-mobile-web-app-status-bar-style" content="default" />
-        <link rel="apple-touch-icon" href="/img/gptr-black-logo.png" />
+        <link rel="apple-touch-icon" href="/img/dailyhot-logo.svg" />
       </head>
       <body
-        className={`app-container ${inter.className} flex min-h-screen flex-col justify-between`}
+        className="app-container flex min-h-screen flex-col justify-between"
         suppressHydrationWarning
       >
         <ResearchHistoryProvider>

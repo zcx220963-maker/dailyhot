@@ -4,10 +4,11 @@ import { getHost } from '../helpers/getHost';
 
 export const useWebSocket = (
   setOrderedData: React.Dispatch<React.SetStateAction<Data[]>>,
-  setAnswer: React.Dispatch<React.SetStateAction<string>>, 
+  setAnswer: React.Dispatch<React.SetStateAction<string>>,
   setLoading: React.Dispatch<React.SetStateAction<boolean>>,
   setShowHumanFeedback: React.Dispatch<React.SetStateAction<boolean>>,
-  setQuestionForHuman: React.Dispatch<React.SetStateAction<boolean | true>>
+  setQuestionForHuman: React.Dispatch<React.SetStateAction<boolean | true>>,
+  setHotItems?: React.Dispatch<React.SetStateAction<any[]>>
 ) => {
   const [socket, setSocket] = useState<WebSocket | null>(null);
   const heartbeatInterval = useRef<number>();
@@ -124,6 +125,10 @@ export const useWebSocket = (
               // Replace entire report with the complete version (includes images)
               console.log('Received complete report with images');
               setAnswer(data.output);
+              // Capture structured hot items if present (for follow-up chat)
+              if (setHotItems && data.metadata && Array.isArray(data.metadata.hot_items)) {
+                setHotItems(data.metadata.hot_items);
+              }
             } else if (data.type === 'path') {
               setLoading(false);
             }
@@ -148,7 +153,7 @@ export const useWebSocket = (
         }
       };
     }
-  }, [socket, setOrderedData, setAnswer, setLoading, setShowHumanFeedback, setQuestionForHuman]);
+  }, [socket, setOrderedData, setAnswer, setLoading, setShowHumanFeedback, setQuestionForHuman, setHotItems]);
 
   return { socket, setSocket, initializeWebSocket };
 };

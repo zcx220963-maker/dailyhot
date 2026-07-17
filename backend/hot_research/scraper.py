@@ -21,7 +21,7 @@ async def fetch_article_text(url: str, timeout: int = 12) -> tuple[str, str]:
     策略:
     1. 视频链接直接跳过
     2. 快速路径 — requests + BeautifulSoup（适合新闻/文章页）
-    3. 慢速路径 — 回退到项目自带的 browser scraper（Playwright）
+    3. 慢速路径 — 回退到项目自带的 Scraper
     """
     from hot_research.daily_hot_api import _proxy
 
@@ -36,7 +36,7 @@ async def fetch_article_text(url: str, timeout: int = 12) -> tuple[str, str]:
     except Exception as e:
         logger.debug(f"_bs_fetch 失败 {url}: {e}")
 
-    # --- 慢速路径: 使用项目自带的浏览器爬取 ---
+    # --- 慢速路径: 项目自带的 Scraper ---
     try:
         from gpt_researcher.scraper.scraper import Scraper
         from gpt_researcher.config.config import Config

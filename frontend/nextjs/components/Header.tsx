@@ -22,8 +22,8 @@ const Header = ({ loading, isStopped, showResult, onStop, onNewResearch, isCopil
           {/* Logo/Home link */}
           <a href="/">
             <img
-              src="/img/gptr-logo.png"
-              alt="logo"
+              src="/img/dailyhot-logo.svg"
+              alt="DailyHot"
               width={60}
               height={60}
               className="lg:h-16 lg:w-16"

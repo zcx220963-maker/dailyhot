@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import './Settings.css';
 import ChatBox from './ChatBox';
+import CookieUpload from './CookieUpload';
 import { ChatBoxSettings } from '@/types/data';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from "framer-motion";
@@ -126,6 +127,7 @@ const Modal: React.FC<ChatBoxProps> = ({ chatBoxSettings, setChatBoxSettings }) 
 
                 {activeTab === 'report_settings' && (
                   <div className="App">
+                    <CookieUpload />
                     <header className="App-header">
                       <ChatBox setChatBoxSettings={setChatBoxSettings} chatBoxSettings={chatBoxSettings} />
                     </header>

@@ -42,6 +42,10 @@ package-lock.json
 #Vim swp files
 *.swp
 
+# Cookie files (sensitive)
+backend/cookies.txt
+backend/cookies_douyin.txt
+
 # Log files
 logs/
 *.orig

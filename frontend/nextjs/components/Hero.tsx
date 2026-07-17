@@ -143,7 +143,7 @@ const Hero: FC<THeroProps> = ({
             className="mt-6 text-center px-4"
           >
             <p className="text-gray-400 text-sm font-light">
-              GPT Researcher 可能会出错，请核实重要信息并检查来源。
+              DailyHot 可能会出错，请核实重要信息并检查来源。
             </p>
           </motion.div>
         </motion.div>
