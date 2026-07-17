@@ -8,8 +8,6 @@
 
 基于 LLM 意图识别，支持抖音、B站、知乎、微博、头条等主流平台热榜，生成结构化的热点分析报告。
 
-[English](README.md) | [中文](README-zh_CN.md)
-
 </div>
 
 ## 功能特性
@@ -171,12 +169,12 @@ npm run dev
 - **LLM**：OpenAI 兼容 API（支持自定义模型）
 - **部署**：Docker, Docker Compose
 
-## 📄 License
+## 开源协议
 
-This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
+本项目基于 Apache License 2.0 协议开源，详见 [LICENSE](LICENSE) 文件。
 
 ---
 
 <p align="right">
-  <a href="#top">⬆️ Back to Top</a>
+  <a href="#top">⬆️ 返回顶部</a>
 </p>
