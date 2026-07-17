@@ -338,37 +338,75 @@ def _fallback_find_related(title: str, items: list[dict], max_results: int = 3) 
     return related
 
 
+def _extract_entities(text: str) -> set[str]:
+    """简单命名实体提取：长度>=2的中文连续片段（排除纯停用词）。
+
+    对热榜标题来说，"实体"基本就是名词性短语（人名/地名/品牌/事件关键词）。
+    """
+    stopwords = {
+        '的', '了', '在', '是', '为', '和', '与', '或', '之', '中', '后',
+        '将', '被', '把', '从', '以', '及', '对', '向', '于', '也', '就',
+        '而', '但', '却', '又', '很', '最', '更', '并', '该', '其', '这',
+        '那', '有', '不', '都', '也', '上', '下', '里', '去', '来', '过',
+        '出', '起', '到', '给', '让', '用', '所', '当', '吗', '呢', '啊',
+        '哦', '嗯', '呀', '哈', '嘛', '啦', '么', '个', '年', '月', '日',
+    }
+    # 提取 >=2 字的中文词（用 jieba 如果可用，否则用 2-4 滑动窗口）
+    entities: set[str] = set()
+    try:
+        import jieba
+        for word in jieba.lcut(text):
+            w = word.strip()
+            if len(w) >= 2 and w not in stopwords and any('一' <= c <= '鿿' for c in w):
+                entities.add(w)
+    except ImportError:
+        # 无 jieba：用 2-3 字滑动窗口
+        clean = re.sub(r'[^一-鿿]', '', text)
+        for n in (4, 3, 2):
+            for i in range(len(clean) - n + 1):
+                gram = clean[i:i + n]
+                if gram not in stopwords:
+                    entities.add(gram)
+    return entities
+
+
 def find_related(title: str, items: list[dict], max_results: int = 3) -> list[dict]:
     """在另一平台的热搜中寻找相关条目。
 
-    优先使用 embedding 向量语义匹配（余弦相似度）；
-    embedding 不可用时回退到字符串重叠匹配。
+    策略：
+    1. embedding 余弦相似度筛选候选
+    2. 实体重合硬过滤（两条标题必须共享至少一个实体关键词，否则视为无关）
+    3. 相似度阈值提升到 0.65
     """
     if not items:
         return []
+
+    query_entities = _extract_entities(title)
 
     # 尝试 embedding 语义匹配
     embedder = _get_embedding_model()
     if embedder is not None:
         try:
-            # 批量计算所有标题的 embedding
             all_titles = [title] + [it.get("title", "") for it in items]
             embeddings = embedder.embed_documents(all_titles)
             query_vec = embeddings[0]
             item_vecs = embeddings[1:]
 
-            # 计算余弦相似度并排序
             scored: list[tuple[float, int]] = []
             for i, vec in enumerate(item_vecs):
                 sim = _cosine_similarity(query_vec, vec)
                 scored.append((sim, i))
             scored.sort(key=lambda x: x[0], reverse=True)
 
-            # 取相似度 > 0.5 的前 max_results 个
             related = []
             for sim, idx in scored:
-                if sim < 0.5:
+                if sim < 0.65:
                     break
+                # 实体重合硬过滤：两条标题至少共享一个实体关键词
+                candidate_title = items[idx].get("title", "")
+                candidate_entities = _extract_entities(candidate_title)
+                if query_entities and candidate_entities and not query_entities & candidate_entities:
+                    continue
                 related.append(items[idx])
                 if len(related) >= max_results:
                     break
@@ -377,5 +415,4 @@ def find_related(title: str, items: list[dict], max_results: int = 3) -> list[di
         except Exception as e:
             logger.warning(f"Embedding 匹配失败，回退到字符串匹配: {e}")
 
-    # 回退
     return _fallback_find_related(title, items, max_results)

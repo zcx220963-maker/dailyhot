@@ -1,6 +1,5 @@
 import { useRef, useState, useEffect, useCallback } from 'react';
 import { Data, ChatBoxSettings, QuestionData } from '../types/data';
-import { getHost } from '../helpers/getHost';
 
 export const useWebSocket = (
   setOrderedData: React.Dispatch<React.SetStateAction<Data[]>>,
@@ -53,15 +52,11 @@ export const useWebSocket = (
       socket.close(1000, "New connection requested");
     }
 
-    const storedConfig = localStorage.getItem('apiVariables');
-    const apiVariables = storedConfig ? JSON.parse(storedConfig) : {};
-
     if (typeof window !== 'undefined') {
-      
-      let fullHost = getHost()
-      const protocol = fullHost.includes('https') ? 'wss:' : 'ws:'
-      const cleanHost = fullHost.replace('http://', '').replace('https://', '')
-      const ws_uri = `${protocol}//${cleanHost}/ws`
+
+      // WebSocket 连接后端（浏览器侧），使用 NEXT_PUBLIC_BACKEND_URL（ws://localhost:8001）
+      const backendBase = process.env.NEXT_PUBLIC_BACKEND_URL || 'ws://localhost:8001';
+      const ws_uri = `${backendBase.replace(/\/$/, '')}/ws`;
 
       console.log(`Creating new WebSocket connection to ${ws_uri}`);
       const newSocket = new WebSocket(ws_uri);

@@ -20,9 +20,10 @@ if __name__ == "__main__":
     # Start the server
     uvicorn.run(
         "server.app:app",
-        host="0.0.0.0", 
+        host="0.0.0.0",
         port=8001,
-        reload=True,
+        reload=False,
+        workers=1,
         log_level="info"
     )
 

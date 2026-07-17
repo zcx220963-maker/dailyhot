@@ -191,7 +191,10 @@ async def run_agent(task, report_type, report_source, source_urls, document_urls
         # MCP 拉齐全平台数据（Agent 内部走 ReAct + get_all_hot_list）
         # primary_codes 来自统一意图识别；全平台兜底
         primary_codes = intent_primary if intent_primary else [p[0] for p in PLATFORMS]
-        all_raw, primary_codes = await collect_hot_data(
+        # 从用户原始输入提取条数限制（"前20" → 20）
+        from backend.hot_research.hot_list_agent import extract_limit_from_query
+        primary_limit = extract_limit_from_query(task)
+        all_raw, primary_codes, _ = await collect_hot_data(
             query=task,
             primary_codes=primary_codes,
             hot_platforms=hot_platforms,
@@ -200,7 +203,7 @@ async def run_agent(task, report_type, report_source, source_urls, document_urls
 
         await stream_output(
             "logs", "agent_done",
-            f"✅ 数据收集完成，主干平台: {primary_codes}",
+            f"✅ 数据收集完成，主干平台: {primary_codes}（前 {primary_limit} 条）",
             websocket=logs_handler, output_log=True,
         )
 
@@ -211,6 +214,7 @@ async def run_agent(task, report_type, report_source, source_urls, document_urls
             websocket=logs_handler,
             tone=tone,
             config_path=config_path,
+            max_text_items=primary_limit,
         )
         report = await researcher.run()
 

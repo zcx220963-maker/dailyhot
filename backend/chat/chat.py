@@ -106,66 +106,80 @@ class ChatAgentWithMemory:
             "- 其他：按用户要求"
         )
 
-    def _setup_rag(self):
-        """对报告切片 + 生成嵌入向量，存入内存供检索。"""
-        if not self.report or len(self.report.strip()) < 50:
-            return
-
-        # 1. 切片：按 Markdown 标题优先，其次固定长度
-        try:
-            text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=800,
-                chunk_overlap=80,
-                separators=["\n## ", "\n### ", "\n\n", "\n", "。", "，", " "],
-            )
-        except TypeError:
-            # 旧版 langchain 不支持 separators
-            text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=800,
-                chunk_overlap=80,
-            )
-        self._chunks = text_splitter.split_text(self.report)
-        if not self._chunks:
-            return
-
-        # 2. 嵌入：使用 huggingface sentence-transformers（本地模型，无需 API key）
-        try:
-            from langchain_huggingface import HuggingFaceEmbeddings
-            model_name = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-            self._embed_fn = HuggingFaceEmbeddings(model_name=model_name)
-            vectors = self._embed_fn.embed_documents(self._chunks)
-            self._embeddings = np.array(vectors, dtype=np.float32)
-            logger.info(f"RAG: 报告切成 {len(self._chunks)} 块，嵌入维度 {self._embeddings.shape[1]}")
-        except Exception as e:
-            logger.warning(f"RAG 嵌入初始化失败（将跳过 RAG，仅用索引表）: {e}")
-            self._embed_fn = None
-            self._embeddings = None
+    def _build_item_context(self, idx: int) -> str:
+        """从 hot_items 直接构建第 idx 条的新闻上下文（标题+摘要+跨平台链接）。"""
+        if not self.hot_items or idx < 0 or idx >= len(self.hot_items):
+            return ""
+        item = self.hot_items[idx]
+        lines = [
+            f"## 新闻 #{idx+1}",
+            f"**平台**: {item.get('platform', '')}  **排名**: #{item.get('rank', '')}  **热度**: {item.get('hot', '')}",
+            f"**标题**: {item.get('title', '')}",
+        ]
+        if item.get("url"):
+            f"**链接**: {item['url']}"
+            lines.append(f"**链接**: {item['url']}")
+        if item.get("summary"):
+            lines.append(f"**报道摘要**:\n{item['summary']}")
+        related = item.get("related_links", [])
+        if related:
+            lines.append("**跨平台相关报道**:")
+            for r in related:
+                u = r.get("url", "")
+                t = r.get("title", "")
+                p = r.get("platform", "")
+                line = f"  - {p}: {t}"
+                if u:
+                    line += f" → {u}"
+                lines.append(line)
+        return "\n".join(lines)
 
     def retrieve(self, query: str, top_k: int = 4) -> str:
-        """对查询做语义检索，返回最相关的几段原文拼接。"""
-        if not self._embed_fn or self._embeddings is None or not self._chunks:
-            return ""
+        """保留接口兼容性，实际不再使用（改用 hot_items 直接定位）。"""
+        return ""
+
+    # 违规域名黑名单（成人、赌博、垃圾站等）
+    _BLOCKED_DOMAINS = {
+        '51chigua', '51cg', 'hgyubxjlw', 'theporndude', 'pornhub',
+        'xvideos', 'xhamster', 'redtube', 'youporn', 'spankbang',
+        'chaturbate', 'onlyfans', 'fansly', 'manyvids',
+    }
+
+    def _is_blocked(self, url: str, title: str = "") -> bool:
+        """检查 URL 或标题是否包含违规内容。"""
+        from urllib.parse import parse_qs, urlparse
         try:
-            q_vec = np.array(self._embed_fn.embed_query(query), dtype=np.float32)
-            # 余弦相似度
-            norms = np.linalg.norm(self._embeddings, axis=1) * np.linalg.norm(q_vec)
-            norms = np.where(norms == 0, 1e-9, norms)
-            sims = self._embeddings.dot(q_vec) / norms
-            top_idx = np.argsort(sims)[-top_k:][::-1]
-            selected = [self._chunks[i] for i in top_idx if sims[i] > 0.1]
-            if not selected:
-                return ""
-            return "\n\n---\n\n".join(selected)
-        except Exception as e:
-            logger.error(f"RAG 检索失败: {e}")
-            return ""
+            host = (urlparse(url).hostname or "").lower()
+        except Exception:
+            host = ""
+        # 域名黑名单
+        for domain in self._BLOCKED_DOMAINS:
+            if domain in host:
+                return True
+        # 标题关键词过滤（中文 + 英文）
+        blocked_keywords = [
+            '口爆', '吞精', '做爱', '性爱', '裸聊', '约炮', '援交',
+            'porn', 'xxx', 'sex', 'nude', 'naked', 'escort',
+        ]
+        title_lower = (title or "").lower()
+        for kw in blocked_keywords:
+            if kw in title_lower:
+                return True
+        return False
 
     def quick_search(self, query):
         """Perform a web search for current information using DuckDuckGo"""
         try:
             logger.info(f"Performing DuckDuckGo search for: {query}")
             from ddgs import DDGS
-            raw = list(DDGS().text(query, region='cn-zh', max_results=5))
+            # safesearch='on' 开启安全搜索，过滤成人内容
+            raw = list(DDGS().text(query, region='cn-zh', max_results=8, safesearch='on'))
+            # 过滤违规结果
+            filtered = [r for r in raw if not self._is_blocked(r.get("href", ""), r.get("title", ""))]
+            # 如果过滤后不足 3 条，说明查询本身可能有问题，返回空
+            if len(filtered) < 1 and len(raw) > 0:
+                logger.warning(f"quick_search: 所有 {len(raw)} 条结果均被过滤，查询可能涉及违规内容: {query}")
+                return {"results": [], "filtered": True}
             results = {
                 "results": [
                     {
@@ -173,7 +187,7 @@ class ChatAgentWithMemory:
                         "url": r.get("href", ""),
                         "content": r.get("body", ""),
                     }
-                    for r in raw
+                    for r in filtered[:5]
                 ]
             }
             # Store search metadata for frontend
@@ -185,7 +199,7 @@ class ChatAgentWithMemory:
                         "url": r.get("href", ""),
                         "content": r.get("body", "")[:200] + "..." if len(r.get("body", "")) > 200 else r.get("body", ""),
                     }
-                    for r in raw
+                    for r in filtered[:5]
                 ],
             }
             return results
@@ -195,99 +209,108 @@ class ChatAgentWithMemory:
 
 
     async def process_chat_completion(self, messages: List[Dict[str, str]]):
-        """Process chat completion using configured LLM provider with tool calling support"""
-        # Create a search tool using the utility function
-        search_tool = create_search_tool(self.quick_search)
-        
-        # Use the tool-enabled chat completion utility
-        response, tool_calls_metadata = await create_chat_completion_with_tools(
+        """Process chat completion using configured LLM provider.
+        使用简单 LLM 调用（不依赖工具调用），兼容性更好。
+        """
+        from gpt_researcher.utils.llm import create_chat_completion
+        response = await create_chat_completion(
             messages=messages,
-            tools=[search_tool],
             model=self.config.smart_llm_model,
             llm_provider=self.config.smart_llm_provider,
             llm_kwargs=self.config.llm_kwargs,
         )
-        
-        # Process metadata to match the expected format for the chat system
-        processed_metadata = []
-        for metadata in tool_calls_metadata:
-            if metadata.get("tool") == "search_tool":
-                # Extract query from args
-                query = metadata.get("args", {}).get("query", "")
-                
-                # Trigger search again to get metadata (the search was already executed by LangChain)
-                if query:
-                    self.quick_search(query)  # This populates self.search_metadata
-                    
-                processed_metadata.append({
-                    "tool": "quick_search",
-                    "query": query,
-                    "search_metadata": self.search_metadata
-                })
-        
-        return response, processed_metadata
+        return response, []
 
 
     async def chat(self, messages, websocket=None):
-        """Chat with configured LLM provider. 使用 RAG 按需检索报告片段，
-        不再把完整报告塞进 system prompt。"""
+        """Chat with configured LLM provider.
+        双路径策略：
+        - 路径A：hot_items 能直接定位（"第N个"、"XX平台那条"、标题关键词）→ 用结构化数据
+        - 路径B：定位不到 → RAG 检索报告全文兜底
+        """
         try:
-            # 1. 取出最新一条用户消息，用于 RAG 检索
+            # 1. 取出最新一条用户消息
             latest_user_msg = ""
             for msg in reversed(messages):
                 if msg.get("role") == "user":
                     latest_user_msg = msg.get("content", "")
                     break
 
-            # 2. RAG：根据用户问题检索报告相关片段
-            retrieved_context = self.retrieve(latest_user_msg, top_k=4) if latest_user_msg else ""
+            # 2. 路径A：hot_items 直接定位
+            item_context = ""
+            targeted_title = ""
+            targeted_idx = self._resolve_target_index(latest_user_msg)
+            if targeted_idx is not None:
+                item_context = self._build_item_context(targeted_idx)
+                targeted_title = self.hot_items[targeted_idx].get("title", "")
 
-            # 3. 系统提示不再包含完整报告，只保留角色定义 + 索引表 + 输出指引
+            # 3. 路径B：定位不到 → RAG 检索报告全文
+            rag_context = ""
+            if not item_context:
+                rag_query = targeted_title if targeted_title else latest_user_msg
+                rag_context = self.retrieve(rag_query, top_k=4) if rag_query else ""
+
+            # 4. 联网搜索（有目标标题搜目标，否则搜用户原始问题）
+            search_context = ""
+            search_metadata = None
+            if targeted_title or latest_user_msg:
+                search_results = self.quick_search(targeted_title if targeted_title else latest_user_msg)
+                search_metadata = self.search_metadata
+                if search_results and search_results.get("results"):
+                    parts = []
+                    for r in search_results["results"][:3]:
+                        parts.append(f"[{r.get('title', '')}]({r.get('url', '')})\n{r.get('content', '')[:300]}")
+                    search_context = "\n\n".join(parts)
+
+            # 5. 日志
+            logger.info(f"[CHAT] mode={'item' if item_context else 'rag'}, "
+                        f"idx={targeted_idx}, title='{targeted_title}', "
+                        f"item_ctx={len(item_context)}, rag={len(rag_context)}, search={len(search_context)}")
+
+            # 6. 系统提示
             system_parts = [
-                "You are GPT Researcher, an autonomous research agent. ",
-                "This is a chat about a research report. Answer based on the given context and report.",
+                "你是一个专业资讯分析师。用户正在看一份热榜报告，针对某条热点追问。",
+                "**必须严格基于提供的新闻资料和联网搜索来回答**，不要使用自己的先验知识。",
+                "如果资料为空或不足以回答，请明确告知用户而非编造内容。",
                 "",
-                "You may use the quick_search tool when the user asks about information",
-                "that might require current data not found in the report.",
-                "",
-                "You must respond in markdown format, readable with paragraphs, tables, etc.",
-                f"Assume the current time is: {datetime.now()}.",
+                "输出格式要求：",
+                "- 使用 Markdown 格式，段落清晰",
+                "- 口播稿：约 750 字，口语化，开场白 + 3 段主体 + 结尾互动",
+                "- 深度分析：约 500 字，带小标题，背景→现状→影响→展望",
+                "- 总结：100 字以内，3 个 bullet",
+                f"当前时间：{datetime.now().strftime('%Y年%m月%d日')}",
             ]
-            # 热榜索引（如果有）
             hot_prompt = self._hot_items_prompt()
             if hot_prompt:
                 system_parts.append(hot_prompt)
 
             system_prompt = "\n".join(system_parts)
 
-            # 4. 组装消息：system +（检索到的上下文作为 assistant 前缀）+ 消息历史
-            formatted_messages = [
-                {"role": "system", "content": system_prompt}
-            ]
+            # 7. 组装消息：hot_items 优先，RAG 兜底
+            formatted_messages = [{"role": "system", "content": system_prompt}]
 
-            # 把 RAG 检索到的片段作为一条 tool_result 注入到消息历史最前面
-            # 这样 LLM 看到的不是全量报告，而是与当前问题相关的片段
-            if retrieved_context:
+            if item_context:
                 formatted_messages.append({
                     "role": "assistant",
-                    "content": (
-                        "我已经从完整报告中检索到了以下与问题相关的段落，"
-                        "你可以基于这些内容回答。如果信息不足，可以调用 quick_search 联网搜索。\n\n"
-                        f"{retrieved_context}"
-                    )
+                    "content": f"用户针对以下新闻提问：\n\n{item_context}"
+                })
+            elif rag_context:
+                formatted_messages.append({
+                    "role": "assistant",
+                    "content": f"从报告中检索到的相关段落：\n\n{rag_context}"
                 })
 
-            # 原始消息历史
+            if search_context:
+                formatted_messages.append({
+                    "role": "assistant",
+                    "content": f"联网搜索补充资料：\n\n{search_context}"
+                })
+
             for msg in messages:
                 if 'role' in msg and 'content' in msg:
-                    formatted_messages.append({
-                        "role": msg["role"],
-                        "content": msg["content"]
-                    })
-                else:
-                    logger.warning(f"Skipping message with missing role or content: {msg}")
+                    formatted_messages.append({"role": msg["role"], "content": msg["content"]})
 
-            # 5. 调用 LLM
+            # 8. 调用 LLM
             ai_message, tool_calls_metadata = await self.process_chat_completion(formatted_messages)
 
             if not ai_message:
@@ -300,6 +323,104 @@ class ChatAgentWithMemory:
         except Exception as e:
             logger.error(f"Error in chat: {str(e)}", exc_info=True)
             raise
+
+    _CN_NUM = {
+        '零': 0, '一': 1, '二': 2, '两': 2, '三': 3, '四': 4, '五': 5,
+        '六': 6, '七': 7, '八': 8, '九': 9, '十': 10, '百': 100, '千': 1000,
+    }
+
+    @classmethod
+    def _chinese_to_int(cls, s: str) -> int:
+        """将中文数字字符串（如 '十二', '三百二十五'）转为 int。"""
+        if not s:
+            return 0
+        # 纯数字
+        if s.isdigit():
+            return int(s)
+        # 十 开头（十一 ~ 十九）
+        if s.startswith('十'):
+            s = '一' + s
+        total, section = 0, 0
+        for ch in s:
+            num = cls._CN_NUM.get(ch, 0)
+            if num >= 10:
+                if section == 0:
+                    section = 1
+                section *= num
+                total += section
+                section = 0
+            else:
+                section = section * 10 + num if section else num
+        return total + section
+
+    def _resolve_target_index(self, user_msg: str) -> Optional[int]:
+        """解析用户指的是 hot_items 的第几条 → 返回 0-based index 或 None。"""
+        import re
+        if not self.hot_items:
+            return None
+
+        # 阿拉伯数字：第1个、第12条
+        m = re.search(r'第\s*(\d+)\s*[个条位]?', user_msg)
+        if m:
+            idx = int(m.group(1)) - 1
+            if 0 <= idx < len(self.hot_items):
+                return idx
+
+        # 中文数字：第一条、第二位
+        m = re.search(r'第\s*([零一二两三四五六七八九十百千]+)\s*[个条位]?', user_msg)
+        if m:
+            idx = self._chinese_to_int(m.group(1)) - 1
+            if 0 <= idx < len(self.hot_items):
+                return idx
+
+        # 平台名：抖音那条、B站那个
+        for i, item in enumerate(self.hot_items):
+            platform = item.get("platform", "")
+            if platform and platform in user_msg:
+                return i
+
+        # 标题关键词：用户消息里有标题的部分文本
+        for i, item in enumerate(self.hot_items):
+            title = item.get("title", "")
+            if title and len(title) >= 4:
+                # 取标题的任意连续4字，看是否出现在用户消息里
+                for j in range(len(title) - 3):
+                    if title[j:j+4] in user_msg:
+                        return i
+
+        return None
+
+    def _resolve_target_title(self, user_msg: str) -> str:
+        """根据用户消息和热榜索引表，解析用户指的是哪条热点 → 返回该条目标题。
+
+        支持格式：
+        - 阿拉伯数字：第1个、第12条、第3位
+        - 中文数字：第十二条、第三个、第二位
+        """
+        import re
+
+        # 匹配 "第N个/条/位"（阿拉伯数字）
+        m = re.search(r'第\s*(\d+)\s*[个条位]?', user_msg)
+        if m and self.hot_items:
+            idx = int(m.group(1)) - 1
+            if 0 <= idx < len(self.hot_items):
+                return self.hot_items[idx].get("title", "")
+
+        # 匹配 "第N个/条/位"（中文数字）
+        m = re.search(r'第\s*([零一二两三四五六七八九十百千]+)\s*[个条位]?', user_msg)
+        if m and self.hot_items:
+            idx = self._chinese_to_int(m.group(1)) - 1
+            if 0 <= idx < len(self.hot_items):
+                return self.hot_items[idx].get("title", "")
+
+        # 匹配 "XX平台那条/那个"
+        for item in self.hot_items:
+            platform = item.get("platform", "")
+            if platform and platform in user_msg:
+                return item.get("title", "")
+
+        # 兜底：返回空，让 RAG 用用户原始消息检索
+        return ""
 
     def get_context(self):
         """return the current context of the chat"""

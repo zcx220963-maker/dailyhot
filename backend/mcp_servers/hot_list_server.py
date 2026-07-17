@@ -151,12 +151,23 @@ def _build_server():
         )(_registered)
 
     @mcp.tool(name="get_all_hot_list", description="一次性抓取所有支持平台的热榜数据（仅标题+URL，快速返回）")
-    async def get_all_hot_list(default_limit: int = 30) -> str:
-        """抓取所有平台的热榜数据 —— 不爬正文，返回标题+URL+热度。"""
+    async def get_all_hot_list(default_limit: int = 50, primary_limit: int = 0) -> str:
+        """抓取所有平台的热榜数据 —— 不爬正文，返回标题+URL+热度。
+
+        Args:
+            default_limit: 辅助平台拉取条数（默认50条，做匹配池）
+            primary_limit: 主干平台拉取条数（0 表示与 default_limit 相同）
+        """
+        # 主干平台代码从环境变量读取（由 hot_list_agent 设置）
+        primary_codes_env = os.environ.get("PRIMARY_CODES", "")
+        primary_codes = [c.strip() for c in primary_codes_env.split(",") if c.strip()]
+        plimit = primary_limit if primary_limit > 0 else default_limit
+
         result = {}
         for code, name, _, readable in platforms:
+            limit = plimit if code in primary_codes else default_limit
             try:
-                items = fetch_hot(code, default_limit)
+                items = fetch_hot(code, limit)
                 result[code] = {"platform": name, "count": len(items), "items": items}
             except Exception as e:
                 result[code] = {"platform": name, "count": 0, "items": [], "error": str(e)}
@@ -199,11 +210,15 @@ def _build_server():
             if not primary_codes:
                 primary_codes = [p[0] for p in platforms]
 
+            # 从用户查询提取条数限制
+            from backend.hot_research.hot_list_agent import extract_limit_from_query
+            primary_limit = extract_limit_from_query(query)
+
             # 2. 抓取全平台原始数据
             all_raw_data: dict[str, list[dict]] = {}
             for code, name, _, _ in platforms:
                 try:
-                    all_raw_data[code] = fetch_hot(code, 30)
+                    all_raw_data[code] = fetch_hot(code, 30)  # 辅助平台固定做30条池
                 except Exception as e:
                     logger.warning(f"抓取 {name}({code}) 失败: {e}")
                     all_raw_data[code] = []
@@ -220,6 +235,7 @@ def _build_server():
                 all_raw_data=all_raw_data,
                 primary_codes=primary_codes,
                 websocket=dummy_ws,
+                max_text_items=primary_limit,
             )
             report = await agent.run()
 

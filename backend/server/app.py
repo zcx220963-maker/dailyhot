@@ -494,6 +494,93 @@ async def chat(chat_request: ChatRequest):
         logger.error(f"Error processing chat request: {str(e)}", exc_info=True)
         return {"error": str(e)}
 
+
+@app.post("/api/chat/feishu")
+async def chat_forward_feishu(request: Request):
+    """追问回复转发到飞书。"""
+    try:
+        data = await request.json()
+        content = data.get("content", "")
+        title = data.get("title", "AI 追问回复")
+        if not content:
+            return JSONResponse(status_code=400, content={"ok": False, "error": "内容为空"})
+
+        from gpt_researcher.actions.notifiers import send_report_to_feishu
+        loop = asyncio.get_event_loop()
+        ok = await loop.run_in_executor(None, send_report_to_feishu, content, title)
+        if ok:
+            return {"ok": True, "message": "已推送到飞书"}
+        return JSONResponse(status_code=500, content={"ok": False, "error": "飞书推送失败（检查 .env 中 FEISHU_WEBHOOK_URL 是否配置）"})
+    except Exception as e:
+        logger.error(f"chat/feishu failed: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
+
+
+@app.post("/api/chat/export")
+async def chat_export(request: Request):
+    """追问回复导出（md / pdf / docx）。"""
+    try:
+        data = await request.json()
+        content = data.get("content", "")
+        fmt = data.get("format", "md")
+        filename = data.get("filename", "AI回复")
+        if not content:
+            return JSONResponse(status_code=400, content={"ok": False, "error": "内容为空"})
+
+        if fmt == "md":
+            return {"content": content, "filename": f"{filename}.md"}
+
+        # pdf / docx → 写文件到 outputs/，返回下载路径
+        from pathlib import Path
+        proj_root = Path(__file__).resolve().parent.parent.parent
+        out_dir = proj_root / "outputs"
+        out_dir.mkdir(exist_ok=True)
+
+        if fmt == "docx":
+            try:
+                from docx import Document
+                doc = Document()
+                for line in content.split("\n"):
+                    doc.add_paragraph(line)
+                save_path = out_dir / f"{filename}.docx"
+                doc.save(str(save_path))
+            except ImportError:
+                return JSONResponse(status_code=500, content={"ok": False, "error": "未安装 python-docx，请 pip install python-docx"})
+        elif fmt == "pdf":
+            try:
+                from fpdf import FPDF
+                pdf = FPDF()
+                pdf.add_page()
+                # 尝试加载中文字体，失败则退到纯文本
+                font_loaded = False
+                for font_path in [
+                    proj_root / "static" / "fonts" / "simhei.ttf",
+                    Path("C:/Windows/Fonts/simhei.ttf"),
+                    Path("C:/Windows/Fonts/msyh.ttc"),
+                ]:
+                    if font_path.exists():
+                        pdf.add_font("cn", "", str(font_path), uni=True)
+                        pdf.set_font("cn", size=11)
+                        font_loaded = True
+                        break
+                if not font_loaded:
+                    pdf.set_font("Helvetica", size=11)
+                for line in content.split("\n"):
+                    pdf.cell(0, 6, line.encode("ascii", errors="replace").decode(), ln=True)
+                save_path = out_dir / f"{filename}.pdf"
+                pdf.output(str(save_path))
+            except ImportError:
+                return JSONResponse(status_code=500, content={"ok": False, "error": "未安装 fpdf2，请 pip install fpdf2"})
+        else:
+            return JSONResponse(status_code=400, content={"ok": False, "error": f"不支持的格式: {fmt}"})
+
+        rel_path = f"outputs/{save_path.name}"
+        return {"path": rel_path}
+    except Exception as e:
+        logger.error(f"chat/export failed: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
+
+
 @app.post("/api/reports/{research_id}/chat")
 async def research_report_chat(research_id: str, request: Request):
     """Handle chat requests for a specific research report.
@@ -502,12 +589,13 @@ async def research_report_chat(research_id: str, request: Request):
     try:
         # Get raw JSON data from request
         data = await request.json()
-        
-        # Create chat agent with the report
+
+        # Create chat agent with the report (and optional hot_items)
         chat_agent = ChatAgentWithMemory(
             report=data.get("report", ""),
             config_path="default",
-            headers=None
+            headers=None,
+            hot_items=data.get("hot_items"),
         )
 
         # Process the chat and get response with metadata

@@ -520,4 +520,22 @@ class HotListReport:
             report_lines.append("---")
             report_lines.append("")
 
-        return "\n".join(report_lines)
+        # ---- 追加原始热榜数据（供追问时 RAG 检索用，前端渲染时隐藏）----
+        raw_lines = [
+            "",
+            "<details><summary>原始热榜数据（系统内部使用）</summary>",
+            "",
+        ]
+        for code in primary_codes:
+            items = self.all_raw_data.get(code, [])[: self.max_text_items]
+            platform_name = PLATFORM_NAME_MAP.get(code, code)
+            raw_lines.append(f"### {platform_name}（{code}）原始数据")
+            for i, item in enumerate(items, 1):
+                raw_lines.append(f"{i}. {item.get('title', '')} | 热度:{item.get('hot', '')} | {item.get('url', '')}")
+                text = item.get("text", "")
+                if text:
+                    raw_lines.append(f"   正文: {text[:200]}")
+            raw_lines.append("")
+        raw_lines.append("</details>")
+
+        return "\n".join(report_lines + raw_lines)
