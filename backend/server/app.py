@@ -790,9 +790,14 @@ def _render_pdf_to_bytes(content: str) -> bytes:
     font_candidates = [
         proj_root / "backend" / "static" / "fonts" / "wqy-zenhei.ttc",
         Path("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"),
-        Path("/usr/share/fonts/truetype/arphic/ukai.ttc"),
-        Path("/usr/share/fonts/truetype/arphic/uming.ttc"),
+        Path("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"),
     ]
+    # 兜底：扫描系统所有 ttc/ttf，挑第一个能用的
+    if not any(p.exists() for p in font_candidates):
+        import glob
+        for p in glob.glob("/usr/share/fonts/**/*.ttc", recursive=True) + \
+                 glob.glob("/usr/share/fonts/**/*.ttf", recursive=True):
+            font_candidates.append(Path(p))
     font_path = next((str(p) for p in font_candidates if p.exists()), None)
 
     pdf = FPDF(orientation="P", unit="mm", format="A4")

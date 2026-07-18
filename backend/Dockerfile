@@ -4,15 +4,23 @@ WORKDIR /app
 
 # ── 系统依赖（爬虫 + PDF 中文字体 ────────────────────────────
 # 网络不稳定时自动重试，最多 3 次
+# 两次 apt-get：先装基础工具，再单独装字体（字体包在 slim 镜像里常缺 recommends）
 RUN for i in 1 2 3; do \
         apt-get update && \
-        apt-get install -y --fix-missing --no-install-recommends \
+        apt-get install -y --no-install-recommends \
             build-essential gcc g++ make \
-            pandoc wkhtmltopdf \
-            fonts-wqy-zenhei fonts-arphic-ukai && \
+            pandoc wkhtmltopdf && \
         rm -rf /var/lib/apt/lists/* && \
         break || { echo "apt attempt $i failed, retrying in 5s..."; sleep 5; }; \
     done
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        fontconfig \
+        fonts-wqy-zenhei \
+        fonts-wqy-microhei \
+ || echo "[warn] fonts install skipped (non-fatal)" \
+ && rm -rf /var/lib/apt/lists/* || true
 
 # ── Python 依赖 ───────────────────────────────────────────────
 COPY requirements.txt .
