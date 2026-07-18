@@ -511,8 +511,14 @@ class ChatAgentWithMemory:
             if 0 <= idx < len(items):
                 return idx
 
-        # 中文数字：第一条、第二位
-        m = re.search(r'第\s*([零一二两三四五六七八九十百千]+)\s*[个条位号]?', user_msg)
+        # 中文数字：热点八、第八条、第八、热点第八个
+        m = re.search(r'(?:热点\s*|第\s*)\s*([零一二两三四五六七八九十百千]+)\s*[个条位号]?', user_msg)
+        if m:
+            idx = self._chinese_to_int(m.group(1)) - 1
+            if 0 <= idx < len(items):
+                return idx
+        # 纯中文数字前缀（无 第 / 热点，但位置靠前）："八、" 或 "八." 开头
+        m = re.search(r'^([零一二两三四五六七八九十百千]+)\s*[、.．,，\s]', user_msg)
         if m:
             idx = self._chinese_to_int(m.group(1)) - 1
             if 0 <= idx < len(items):
@@ -552,8 +558,14 @@ class ChatAgentWithMemory:
             if 0 <= idx < len(items):
                 return items[idx].get("title", "")
 
-        # 匹配 "第N个/条/位"（中文数字）
-        m = re.search(r'第\s*([零一二两三四五六七八九十百千]+)\s*[个条位号]?', user_msg)
+        # 匹配 "热点N" / "第N个/条/位"（中文数字）：热点八、第八条、第八、热点第八个
+        m = re.search(r'(?:热点\s*|第\s*)\s*([零一二两三四五六七八九十百千]+)\s*[个条位号]?', user_msg)
+        if m and items:
+            idx = self._chinese_to_int(m.group(1)) - 1
+            if 0 <= idx < len(items):
+                return items[idx].get("title", "")
+        # 纯中文数字前缀（无 第 / 热点，但位置靠前）："八、" 或 "八." 开头
+        m = re.search(r'^([零一二两三四五六七八九十百千]+)\s*[、.．,，\s]', user_msg)
         if m and items:
             idx = self._chinese_to_int(m.group(1)) - 1
             if 0 <= idx < len(items):
