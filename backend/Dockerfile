@@ -9,7 +9,7 @@ RUN for i in 1 2 3; do \
         apt-get install -y --fix-missing --no-install-recommends \
             build-essential gcc g++ make \
             pandoc wkhtmltopdf \
-            fonts-wqy-zenhei fonts-wqy-microhei && \
+            fonts-wqy-zenhei fonts-arphic-ukai && \
         rm -rf /var/lib/apt/lists/* && \
         break || { echo "apt attempt $i failed, retrying in 5s..."; sleep 5; }; \
     done

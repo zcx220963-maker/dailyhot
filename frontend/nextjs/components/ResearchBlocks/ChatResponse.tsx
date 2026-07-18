@@ -111,35 +111,55 @@ export default function ChatResponse({ answer, metadata }: ChatResponseProps) {
                     filename: 'AI回复',
                 }),
             });
-            if (!res.ok) {
-                const err = await res.json().catch(() => ({}));
-                throw new Error(err.error || `导出失败 (${res.status})`);
-            }
 
             if (format === 'md') {
-                // MD returns raw content — download as blob
+                // MD 仍走 JSON → blob
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    throw new Error(err.error || `导出失败 (${res.status})`);
+                }
                 const { content, filename } = await res.json();
                 const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = `${filename || 'AI回复'}.md`;
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-                URL.revokeObjectURL(url);
+                triggerDownload(blob, `${filename || 'AI回复'}.md`);
             } else {
-                // PDF / DOCX returns a file path — trigger download from outputs/
-                const { path } = await res.json();
-                const cleanPath = path.replace(/^\/+/, '');
-                const finalPath = cleanPath.startsWith('outputs/') ? cleanPath : `outputs/${cleanPath}`;
-                window.open(`${host}/${finalPath}`, '_blank');
+                // PDF / DOCX 现在直接返回文件流
+                if (!res.ok) {
+                    // 尝试解析 JSON 错误，否则用 statusText
+                    const err = await res.json().catch(() => ({}));
+                    throw new Error(err.error || `导出失败 (${res.status} ${res.statusText})`);
+                }
+                const blob = await res.blob();
+                if (!blob || blob.size === 0) {
+                    throw new Error('导出文件为空');
+                }
+                const disposition = res.headers.get('Content-Disposition') || '';
+                const match = disposition.match(/filename\*=UTF-8''([^;]+)/i)
+                    || disposition.match(/filename="?([^"]+)"?/i);
+                const fname = match
+                    ? decodeURIComponent(match[1])
+                    : `AI回复.${format}`;
+                triggerDownload(blob, fname);
             }
             toast.success(`已导出 ${format.toUpperCase()}`);
         } catch (err: any) {
             console.error('Export failed:', err);
             toast.error(err.message || '导出失败');
         }
+    };
+
+    const triggerDownload = (blob: Blob, filename: string) => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.style.display = 'none';
+        document.body.appendChild(a);
+        a.click();
+        // 延迟清理，确保下载已开始
+        setTimeout(() => {
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }, 100);
     };
   
     return (
@@ -156,6 +176,8 @@ export default function ChatResponse({ answer, metadata }: ChatResponseProps) {
             </div>
             <div className="flex items-center gap-1">
               <button
+                type="button"
+                onMouseDown={(e) => e.preventDefault()}
                 onClick={copyToClipboard}
                 className="hover:opacity-80 transition-opacity duration-200 p-1"
                 aria-label="复制到剪贴板"
@@ -172,6 +194,7 @@ export default function ChatResponse({ answer, metadata }: ChatResponseProps) {
               <div className="relative" ref={exportMenuRef}>
                 <button
                   type="button"
+                  onMouseDown={(e) => e.preventDefault()}
                   onClick={() => setShowExportMenu(!showExportMenu)}
                   className="hover:opacity-80 transition-opacity duration-200 p-1 rounded text-gray-300 hover:text-white"
                   aria-label="下载"
@@ -184,7 +207,10 @@ export default function ChatResponse({ answer, metadata }: ChatResponseProps) {
                   </svg>
                 </button>
                 {showExportMenu && (
-                  <div className="absolute right-0 bottom-full mb-1 bg-gray-800 border border-gray-600 rounded-lg shadow-xl py-1 z-50 min-w-[140px]">
+                  <div
+                    className="absolute right-0 bottom-full mb-1 bg-gray-800 border border-gray-600 rounded-lg shadow-xl py-1 z-50 min-w-[140px]"
+                    onMouseDown={(e) => e.preventDefault()}
+                  >
                     <button
                       type="button"
                       onClick={() => { exportAnswer('md'); setShowExportMenu(false); }}
@@ -228,6 +254,7 @@ export default function ChatResponse({ answer, metadata }: ChatResponseProps) {
               </div>
               <button
                 type="button"
+                onMouseDown={(e) => e.preventDefault()}
                 onClick={forwardToFeishu}
                 className="hover:opacity-80 transition-opacity duration-200 p-1 rounded text-gray-300 hover:text-white"
                 aria-label="转发到飞书"

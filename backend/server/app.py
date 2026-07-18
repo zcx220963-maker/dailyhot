@@ -97,22 +97,7 @@ class ChatRequest(BaseModel):
 async def lifespan(app: FastAPI):
     # Startup
     os.makedirs("outputs", exist_ok=True)
-    app.mount("/outputs", StaticFiles(directory="outputs"), name="outputs")
-    
-    # Mount frontend static files
-    frontend_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "frontend")
-    if os.path.exists(frontend_path):
-        app.mount("/site", StaticFiles(directory=frontend_path), name="frontend")
-        logger.debug(f"Frontend mounted from: {frontend_path}")
-        
-        # Also mount the static directory directly for assets referenced as /static/
-        static_path = os.path.join(frontend_path, "static")
-        if os.path.exists(static_path):
-            app.mount("/static", StaticFiles(directory=static_path), name="static")
-            logger.debug(f"Static assets mounted from: {static_path}")
-    else:
-        logger.warning(f"Frontend directory not found: {frontend_path}")
-    
+
     # 启动进程内定时任务（每日 9:00 / 20:00 热榜推送）
     init_scheduler()
     logger.info("GPT Researcher API 已就绪 — 本地模式（无数据库持久化）")
@@ -148,6 +133,10 @@ app.add_middleware(
 )
 
 # Use default JSON response class
+
+# 静态文件挂载（必须在 lifespan 之前完成，否则运行时 mount 不生效）
+os.makedirs("outputs", exist_ok=True)
+app.mount("/outputs", StaticFiles(directory="outputs"), name="outputs")
 
 # WebSocket manager
 manager = WebSocketManager()
@@ -525,71 +514,6 @@ async def chat_forward_feishu(request: Request):
         return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
 
 
-@app.post("/api/chat/export")
-async def chat_export(request: Request):
-    """追问回复导出（md / pdf / docx）。"""
-    try:
-        data = await request.json()
-        content = data.get("content", "")
-        fmt = data.get("format", "md")
-        filename = data.get("filename", "AI回复")
-        if not content:
-            return JSONResponse(status_code=400, content={"ok": False, "error": "内容为空"})
-
-        if fmt == "md":
-            return {"content": content, "filename": f"{filename}.md"}
-
-        # pdf / docx → 写文件到 outputs/，返回下载路径
-        from pathlib import Path
-        proj_root = Path(__file__).resolve().parent.parent.parent
-        out_dir = proj_root / "outputs"
-        out_dir.mkdir(exist_ok=True)
-
-        if fmt == "docx":
-            try:
-                from docx import Document
-                doc = Document()
-                for line in content.split("\n"):
-                    doc.add_paragraph(line)
-                save_path = out_dir / f"{filename}.docx"
-                doc.save(str(save_path))
-            except ImportError:
-                return JSONResponse(status_code=500, content={"ok": False, "error": "未安装 python-docx，请 pip install python-docx"})
-        elif fmt == "pdf":
-            try:
-                from fpdf import FPDF
-                pdf = FPDF()
-                pdf.add_page()
-                # 尝试加载中文字体，失败则退到纯文本
-                font_loaded = False
-                for font_path in [
-                    proj_root / "static" / "fonts" / "simhei.ttf",
-                    Path("C:/Windows/Fonts/simhei.ttf"),
-                    Path("C:/Windows/Fonts/msyh.ttc"),
-                ]:
-                    if font_path.exists():
-                        pdf.add_font("cn", "", str(font_path), uni=True)
-                        pdf.set_font("cn", size=11)
-                        font_loaded = True
-                        break
-                if not font_loaded:
-                    pdf.set_font("Helvetica", size=11)
-                for line in content.split("\n"):
-                    pdf.cell(0, 6, line.encode("ascii", errors="replace").decode(), ln=True)
-                save_path = out_dir / f"{filename}.pdf"
-                pdf.output(str(save_path))
-            except ImportError:
-                return JSONResponse(status_code=500, content={"ok": False, "error": "未安装 fpdf2，请 pip install fpdf2"})
-        else:
-            return JSONResponse(status_code=400, content={"ok": False, "error": f"不支持的格式: {fmt}"})
-
-        rel_path = f"outputs/{save_path.name}"
-        return {"path": rel_path}
-    except Exception as e:
-        logger.error(f"chat/export failed: {e}", exc_info=True)
-        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
-
-
 @app.post("/api/reports/{research_id}/chat")
 async def research_report_chat(research_id: str, request: Request):
     """Handle chat requests for a specific research report.
@@ -851,27 +775,150 @@ class ChatExportRequest(BaseModel):
     filename: str = "AI回复"           # 下载文件名（不含扩展名）
 
 
+def _render_pdf_to_bytes(content: str) -> bytes:
+    """用 fpdf2 把 markdown 文本渲染成 PDF bytes（支持中文）。
+
+    不依赖 WeasyPrint，只需 fpdf2 + ttf/ttc 中文字体。
+    纯同步函数，由 run_in_executor 调用。
+    """
+    from fpdf import FPDF
+    from pathlib import Path
+    import re
+
+    # 中文字体候选路径（Docker 镜像 / 开发机）
+    proj_root = Path(__file__).resolve().parent.parent.parent
+    font_candidates = [
+        proj_root / "backend" / "static" / "fonts" / "wqy-zenhei.ttc",
+        Path("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"),
+        Path("/usr/share/fonts/truetype/arphic/ukai.ttc"),
+        Path("/usr/share/fonts/truetype/arphic/uming.ttc"),
+    ]
+    font_path = next((str(p) for p in font_candidates if p.exists()), None)
+
+    pdf = FPDF(orientation="P", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=15)
+
+    if font_path:
+        pdf.add_font("cn", "", font_path)
+        pdf.add_font("cn", "B", font_path)
+        body_font = ("cn", "", 11)
+        bold_font = ("cn", "B", 11)
+    else:
+        body_font = ("Helvetica", "", 10)
+        bold_font = ("Helvetica", "B", 10)
+
+    pdf.add_page()
+
+    # 朴素 markdown 渲染：## 标题、**正文**、列表项、普通段落
+    lines = content.split("\n")
+    for raw in lines:
+        line = raw.rstrip()
+        if not line.strip():
+            pdf.ln(3)
+            continue
+        if line.startswith("# "):
+            pdf.set_font(*body_font); pdf.set_font("cn" if font_path else "Helvetica", "B", 16)
+            pdf.multi_cell(0, 8, line[2:].strip())
+            pdf.ln(2)
+        elif line.startswith("## "):
+            pdf.set_font("cn" if font_path else "Helvetica", "B", 13)
+            pdf.multi_cell(0, 7, line[3:].strip())
+            pdf.ln(1)
+        elif line.startswith(("### ", "- ", "* ")):
+            txt = line.lstrip("#* ").strip()
+            pdf.set_font(*body_font)
+            pdf.multi_cell(0, 6, f"• {txt}")
+        else:
+            # 行内 **bold** 简化为纯文本（fpdf2 不支持行内富文本，按普通行处理）
+            txt = re.sub(r'\*\*(.+?)\*\*', r'\1', line)
+            pdf.set_font(*body_font)
+            pdf.multi_cell(0, 6, txt)
+
+    return pdf.output()
+
+
 @app.post("/api/chat/export")
 async def chat_export(req: ChatExportRequest):
-    """把追问回复导出为 Markdown / PDF / DOCX。"""
-    try:
-        from utils import write_md_to_word, write_md_to_pdf
-        import uuid
+    """把追问回复导出为 Markdown / PDF / DOCX。
 
-        safe_name = sanitize_filename(req.filename) or "AI回复"
-        research_id = f"chat-export-{uuid.uuid4().hex[:8]}"
+    对 PDF / DOCX 直接返回文件流 + Content-Disposition，前端统一用 blob 下载，
+    避免跨 host / 静态文件挂载问题。
+    """
+    from fastapi.responses import StreamingResponse
+    import traceback as _tb, re as _re
+
+    try:
+        from utils import write_md_to_word
+
+        # 安全化文件名：仅保留字母数字、中文、_-.，不强制三段式拆分
+        raw_name = (req.filename or "AI回复").strip()
+        safe_name = _re.sub(r"[^\w一-鿿\-.]", "_", raw_name)[:60] or "AI回复"
+        logger.info(f"[export] format={req.format} filename={safe_name} content_len={len(req.content)}")
+
+        if req.format == "md":
+            # 直接返回 markdown JSON，前端用 blob 下载
+            return {"content": req.content, "filename": f"{safe_name}.md"}
 
         if req.format == "pdf":
-            path = await write_md_to_pdf(req.content, research_id)
-            return {"path": path, "mime": "application/pdf"}
+            # fpdf2 方案：不依赖 WeasyPrint，直接渲染 bytes
+            pdf_bytes = await asyncio.get_running_loop().run_in_executor(
+                None, _render_pdf_to_bytes, req.content
+            )
+            if not pdf_bytes:
+                return JSONResponse(status_code=500, content={"error": "PDF 生成失败"})
+            download_name = f"{safe_name}.pdf"
+            media_type = "application/pdf"
+            blob = pdf_bytes
         elif req.format == "docx":
-            path = await write_md_to_word(req.content, research_id)
-            return {"path": path, "mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
+            # DOCX：统一写到 outputs/ 绝对路径，避免 CWD 漂移（体积可能较大，用线程跑）
+            import urllib
+
+            def _gen_docx():
+                from utils import write_md_to_word
+                proj_root = Path(__file__).resolve().parent.parent.parent
+                out_dir = proj_root / "outputs"
+                out_dir.mkdir(exist_ok=True)
+                old_cwd = os.getcwd()
+                os.chdir(proj_root)  # write_md_to_word 用相对路径，切到 proj_root 确保 outputs/ 落在正确位置
+                try:
+                    return asyncio.run(write_md_to_word(req.content, safe_name))
+                finally:
+                    os.chdir(old_cwd)
+
+            loop = asyncio.get_running_loop()
+            rel_path = await loop.run_in_executor(None, _gen_docx)
+            if not rel_path:
+                return JSONResponse(status_code=500, content={"error": "DOCX 生成失败"})
+            rel_unquoted = urllib.parse.unquote(rel_path)
+            proj_root = Path(__file__).resolve().parent.parent.parent
+            abs_path = (proj_root / rel_unquoted).resolve()
+            if not abs_path.exists():
+                logger.error(f"[export] DOCX missing: abs={abs_path} rel={rel_unquoted} cwd={os.getcwd()}")
+                return JSONResponse(status_code=500, content={"error": "DOCX 文件不存在", "path": str(abs_path)})
+            blob = abs_path.read_bytes()
+            download_name = f"{safe_name}.docx"
+            media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         else:
-            # 直接返回 markdown 文本，前端生成 .md 文件下载
-            return {"content": req.content, "filename": f"{safe_name}.md"}
+            return JSONResponse(status_code=400, content={"error": f"不支持的格式: {req.format}"})
+
+        from urllib.parse import quote
+        # RFC 5987：filename*=UTF-8''xxx 支持中文
+        content_disposition = (
+            f'attachment; filename="{download_name}"; '
+            f"filename*=UTF-8''{quote(download_name)}"
+        )
+
+        def iterfile():
+            # 确保 chunk 是 bytes（某些生成路径返回 bytearray）
+            yield bytes(blob) if isinstance(blob, (bytes, bytearray)) else blob
+
+        return StreamingResponse(
+            iterfile(),
+            media_type=media_type,
+            headers={"Content-Disposition": content_disposition},
+        )
     except Exception as e:
-        logger.error(f"chat_export failed: {e}", exc_info=True)
+        logger.error(f"[export] FAILED format={req.format}: {e}\n{_tb.format_exc()}")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
