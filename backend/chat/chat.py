@@ -74,8 +74,58 @@ class ChatAgentWithMemory:
         # DuckDuckGo search (free, no API key needed)
         self._ddgs = None
 
-        # 初始化 RAG（切片 + 嵌入）
+        # 初始化 RAG（报告切片 + 嵌入，供路径B全文检索）
         self._setup_rag()
+
+    def _setup_rag(self):
+        """对报告切片 + 尝试加载 embedding 模型。embed 不可用时检索会回退到关键词匹配。"""
+        if not self.report or len(self.report.strip()) < 50:
+            return
+        try:
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=800, chunk_overlap=80,
+                separators=["\n## ", "\n### ", "\n\n", "\n", "。", "，", " "],
+            )
+        except TypeError:
+            text_splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=80)
+        self._chunks = text_splitter.split_text(self.report)
+        if not self._chunks:
+            return
+        # 尝试加载 embedding（OpenAI 优先，LongCat 不支持时静默跳过）
+        self._embed_fn = None
+        self._embeddings = None
+        try:
+            from langchain_openai import OpenAIEmbeddings
+            kwargs = {"model": os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")}
+            if os.getenv("OPENAI_API_KEY"):
+                kwargs["api_key"] = os.getenv("OPENAI_API_KEY")
+            base_url = os.getenv("OPENAI_BASE_URL", "")
+            if base_url:
+                kwargs["base_url"] = base_url
+            embed_fn = OpenAIEmbeddings(**kwargs)
+            test_v = embed_fn.embed_query("测试")
+            if test_v and len(test_v) > 0:
+                vectors = embed_fn.embed_documents(self._chunks)
+                self._embed_fn = embed_fn
+                self._embeddings = np.array(vectors, dtype=np.float32)
+                logger.info(f"RAG: embedding 成功，{len(self._chunks)} 块")
+                return
+        except Exception as e:
+            logger.warning(f"RAG embedding 不可用: {e}")
+
+    def _keyword_score(self, query: str, chunk: str) -> float:
+        """关键词重叠评分（embed 不可用时的回退方案）。"""
+        import re
+        query_chars = re.sub(r'[^一-鿿A-Za-z]', '', query)
+        query_terms = set()
+        for n in (2, 3, 4):
+            for i in range(len(query_chars) - n + 1):
+                query_terms.add(query_chars[i:i + n])
+        query_terms.update(re.findall(r'[A-Za-z]+', query))
+        if not query_terms:
+            return 0.0
+        hits = sum(1 for t in query_terms if t in chunk)
+        return hits / len(query_terms)
 
     def _hot_items_prompt(self) -> str:
         """生成热榜条目索引表 + 追问格式指引（仅当 hot_items 非空时）。"""
@@ -143,11 +193,30 @@ class ChatAgentWithMemory:
         '51chigua', '51cg', 'hgyubxjlw', 'theporndude', 'pornhub',
         'xvideos', 'xhamster', 'redtube', 'youporn', 'spankbang',
         'chaturbate', 'onlyfans', 'fansly', 'manyvids',
+        'dmm', 'r18', 'javlibrary', 'avple', 'missav', 'supjav',
+        'tokyomotion', 'erome', 'pornpics', 'porngames', 'adult',
+        'xnxx', 'pornone', 'pornmd', 'thotvids', 'hentai',
+        'rule34', 'gelbooru', 'paheal', 'e621', 'hypnohub',
+        'camwhores', 'camstreams', 'stripchat', 'bongacams',
+        'livejasmin', 'myfreecams', 'camsoda', 'jerkmate',
     }
 
-    def _is_blocked(self, url: str, title: str = "") -> bool:
-        """检查 URL 或标题是否包含违规内容。"""
-        from urllib.parse import parse_qs, urlparse
+    # 违规关键词（中文 + 英文），检查标题和正文
+    _BLOCKED_KEYWORDS = [
+        # 中文
+        '口爆', '吞精', '做爱', '性爱', '裸聊', '约炮', '援交',
+        '强奸', '乱伦', '偷拍', '自慰', '情色', '成人视频',
+        'av女优', '三级片', '激情', '诱惑', '放荡',
+        # 英文
+        'porn', 'xxx', 'sex', 'nude', 'naked', 'escort',
+        'camgirl', 'onlyfans', 'nsfw', 'erotic', 'fetish',
+        'blowjob', 'handjob', 'creampie', 'dildo', 'vibrator',
+        'threesome', 'orgy', 'swinger', 'hardcore', 'softcore',
+    ]
+
+    def _is_blocked(self, url: str, title: str = "", body: str = "") -> bool:
+        """检查 URL、标题或正文是否包含违规内容。"""
+        from urllib.parse import urlparse
         try:
             host = (urlparse(url).hostname or "").lower()
         except Exception:
@@ -156,16 +225,32 @@ class ChatAgentWithMemory:
         for domain in self._BLOCKED_DOMAINS:
             if domain in host:
                 return True
-        # 标题关键词过滤（中文 + 英文）
-        blocked_keywords = [
-            '口爆', '吞精', '做爱', '性爱', '裸聊', '约炮', '援交',
-            'porn', 'xxx', 'sex', 'nude', 'naked', 'escort',
-        ]
-        title_lower = (title or "").lower()
-        for kw in blocked_keywords:
-            if kw in title_lower:
+        # 关键词过滤：同时检查标题 + 正文（DuckDuckGo body 摘要可能含成人内容）
+        text = f"{title or ''} {body or ''}".lower()
+        for kw in self._BLOCKED_KEYWORDS:
+            if kw in text:
                 return True
         return False
+
+    def _sanitize_body(self, body: str) -> str:
+        """从正文摘要中移除包含违规关键词的句子。
+
+        DuckDuckGo body 有时会混入无关甚至违规的句子，直接截断可能丢有效内容，
+        按句子粒度清洗效果更好：只去掉命中关键词的句子，保留其余部分。
+        """
+        if not body:
+            return ""
+        import re
+        # 按句号/问号/感叹号分句（兼容中英文标点）
+        sentences = re.split(r'(?<=[。！？!?\n])', body)
+        cleaned = []
+        for sent in sentences:
+            sent_lower = sent.lower()
+            if any(kw in sent_lower for kw in self._BLOCKED_KEYWORDS):
+                continue
+            cleaned.append(sent)
+        result = "".join(cleaned).strip()
+        return result if result else ""
 
     def quick_search(self, query):
         """Perform a web search for current information using DuckDuckGo"""
@@ -174,9 +259,16 @@ class ChatAgentWithMemory:
             from ddgs import DDGS
             # safesearch='on' 开启安全搜索，过滤成人内容
             raw = list(DDGS().text(query, region='cn-zh', max_results=8, safesearch='on'))
-            # 过滤违规结果
-            filtered = [r for r in raw if not self._is_blocked(r.get("href", ""), r.get("title", ""))]
-            # 如果过滤后不足 3 条，说明查询本身可能有问题，返回空
+            # 过滤违规结果（检查 URL + title + body 全文）
+            filtered = [
+                r for r in raw
+                if not self._is_blocked(
+                    r.get("href", ""),
+                    r.get("title", ""),
+                    r.get("body", ""),
+                )
+            ]
+            # 如果过滤后不足 1 条，说明查询本身可能有问题，返回空
             if len(filtered) < 1 and len(raw) > 0:
                 logger.warning(f"quick_search: 所有 {len(raw)} 条结果均被过滤，查询可能涉及违规内容: {query}")
                 return {"results": [], "filtered": True}
@@ -185,7 +277,7 @@ class ChatAgentWithMemory:
                     {
                         "title": r.get("title", ""),
                         "url": r.get("href", ""),
-                        "content": r.get("body", ""),
+                        "content": self._sanitize_body(r.get("body", "")),
                     }
                     for r in filtered[:5]
                 ]
