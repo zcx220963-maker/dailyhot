@@ -21,11 +21,11 @@ services:
       http_proxy: ""
       https_proxy: ""
     volumes:
-      - ./backend:/app/backend:rw
-      - ./gpt_researcher:/app/gpt_researcher:rw
-      - ./my-docs:/app/my-docs:rw
-      - ./outputs:/app/outputs:rw
-      - ./logs:/app/logs:rw
+      - ${PWD}/backend:/app/backend:rw
+      - ${PWD}/gpt_researcher:/app/gpt_researcher:rw
+      - ${PWD}/my-docs:/app/my-docs:rw
+      - ${PWD}/outputs:/app/outputs:rw
+      - ${PWD}/logs:/app/logs:rw
     restart: unless-stopped
     networks:
       - app-net
