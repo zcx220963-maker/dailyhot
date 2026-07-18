@@ -171,6 +171,7 @@ export default function ChatResponse({ answer, metadata }: ChatResponseProps) {
               </button>
               <div className="relative" ref={exportMenuRef}>
                 <button
+                  type="button"
                   onClick={() => setShowExportMenu(!showExportMenu)}
                   className="hover:opacity-80 transition-opacity duration-200 p-1 rounded text-gray-300 hover:text-white"
                   aria-label="下载"
@@ -183,8 +184,9 @@ export default function ChatResponse({ answer, metadata }: ChatResponseProps) {
                   </svg>
                 </button>
                 {showExportMenu && (
-                  <div className="absolute right-0 top-full mt-1 bg-gray-800 border border-gray-600 rounded-lg shadow-xl py-1 z-50 min-w-[140px]">
+                  <div className="absolute right-0 bottom-full mb-1 bg-gray-800 border border-gray-600 rounded-lg shadow-xl py-1 z-50 min-w-[140px]">
                     <button
+                      type="button"
                       onClick={() => { exportAnswer('md'); setShowExportMenu(false); }}
                       className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-200 hover:bg-gray-700 transition-colors"
                     >
@@ -197,6 +199,7 @@ export default function ChatResponse({ answer, metadata }: ChatResponseProps) {
                       Markdown
                     </button>
                     <button
+                      type="button"
                       onClick={() => { exportAnswer('pdf'); setShowExportMenu(false); }}
                       className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-200 hover:bg-gray-700 transition-colors"
                     >
@@ -208,6 +211,7 @@ export default function ChatResponse({ answer, metadata }: ChatResponseProps) {
                       PDF
                     </button>
                     <button
+                      type="button"
                       onClick={() => { exportAnswer('docx'); setShowExportMenu(false); }}
                       className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-200 hover:bg-gray-700 transition-colors"
                     >
@@ -223,6 +227,7 @@ export default function ChatResponse({ answer, metadata }: ChatResponseProps) {
                 )}
               </div>
               <button
+                type="button"
                 onClick={forwardToFeishu}
                 className="hover:opacity-80 transition-opacity duration-200 p-1 rounded text-gray-300 hover:text-white"
                 aria-label="转发到飞书"

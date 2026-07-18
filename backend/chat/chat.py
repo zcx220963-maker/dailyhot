@@ -128,18 +128,25 @@ class ChatAgentWithMemory:
         return hits / len(query_terms)
 
     def _hot_items_prompt(self) -> str:
-        """生成热榜条目索引表 + 追问格式指引（仅当 hot_items 非空时）。"""
-        if not self.hot_items:
+        """生成热榜条目索引表 + 追问格式指引。
+        优先使用结构化 hot_items；若前端未传入，则从报告文本里提取 ### N. 标题。"""
+        items = self.hot_items
+        if not items:
+            # 从报告里提取 " ### 数字. 标题" 格式
+            items = self._extract_items_from_report()
+        if not items:
             return ""
         idx_lines = []
-        for i, item in enumerate(self.hot_items, 1):
+        for i, item in enumerate(items, 1):
             hot_str = item.get("hot", "")
             hot_display = f" (🔥{hot_str})" if hot_str else ""
             url = item.get("url", "")
             url_display = f"  {url}" if url else ""
+            platform = item.get("platform", "")
+            rank = item.get("rank", i)
+            prefix = f"[{platform} #{rank}] " if platform else ""
             idx_lines.append(
-                f"{i}. [{item.get('platform', '')} #{item.get('rank', i)}] "
-                f"{item.get('title', '')}{hot_display}{url_display}"
+                f"{i}. {prefix}{item.get('title', '')}{hot_display}{url_display}"
             )
         idx_table = "\n".join(idx_lines)
         return (
@@ -156,11 +163,30 @@ class ChatAgentWithMemory:
             "- 其他：按用户要求"
         )
 
+    def _extract_items_from_report(self) -> list[dict]:
+        """当 hot_items 为空时，从报告文本提取 ### N. 标题 作为备用索引。"""
+        import re
+        if not self.report:
+            return []
+        items = []
+        for m in re.finditer(r'###\s*(\d+)\.\s*(.+?)(?:\s*🔥\s*\S+)?\s*$', self.report, re.MULTILINE):
+            items.append({
+                "rank": int(m.group(1)),
+                "title": m.group(2).strip(),
+                "hot": "",
+                "url": "",
+                "platform": "",
+                "summary": "",
+                "related_links": [],
+            })
+        return items
+
     def _build_item_context(self, idx: int) -> str:
-        """从 hot_items 直接构建第 idx 条的新闻上下文（标题+摘要+跨平台链接）。"""
-        if not self.hot_items or idx < 0 or idx >= len(self.hot_items):
+        """从 hot_items（或报告提取的 items）构建第 idx 条的新闻上下文。"""
+        items = self.hot_items or self._extract_items_from_report()
+        if not items or idx < 0 or idx >= len(items):
             return ""
-        item = self.hot_items[idx]
+        item = items[idx]
         lines = [
             f"## 新闻 #{idx+1}",
             f"**平台**: {item.get('platform', '')}  **排名**: #{item.get('rank', '')}  **热度**: {item.get('hot', '')}",
@@ -329,13 +355,31 @@ class ChatAgentWithMemory:
                     latest_user_msg = msg.get("content", "")
                     break
 
+            # DEBUG: 写文件（print 在容器里被 uvicorn logger 吞掉）
+            try:
+                with open("/tmp/chat_debug.log", "a", encoding="utf-8") as _f:
+                    _f.write(f"[CHAT_DEBUG] hot_items={len(self.hot_items)}, "
+                             f"report_len={len(self.report)}, "
+                             f"user_msg={latest_user_msg[:80]}\n")
+                    if self.hot_items:
+                        _f.write(f"[CHAT_DEBUG] first_item={self.hot_items[0].get('title','')[:40]}\n")
+            except Exception:
+                pass
+
             # 2. 路径A：hot_items 直接定位
             item_context = ""
             targeted_title = ""
             targeted_idx = self._resolve_target_index(latest_user_msg)
             if targeted_idx is not None:
                 item_context = self._build_item_context(targeted_idx)
-                targeted_title = self.hot_items[targeted_idx].get("title", "")
+                items_for_title = self.hot_items or self._extract_items_from_report()
+                if items_for_title and targeted_idx < len(items_for_title):
+                    targeted_title = items_for_title[targeted_idx].get("title", "")
+            try:
+                with open("/tmp/chat_debug.log", "a", encoding="utf-8") as _f:
+                    _f.write(f"[CHAT_DEBUG] targeted_idx={targeted_idx}, item_ctx_len={len(item_context)}\n")
+            except Exception:
+                pass
 
             # 3. 路径B：定位不到 → RAG 检索报告全文
             rag_context = ""
@@ -451,33 +495,37 @@ class ChatAgentWithMemory:
         return total + section
 
     def _resolve_target_index(self, user_msg: str) -> Optional[int]:
-        """解析用户指的是 hot_items 的第几条 → 返回 0-based index 或 None。"""
+        """解析用户指的是第几条 → 返回 0-based index 或 None。
+        优先匹配结构化 hot_items；为空时从报告文本提取编号作为 fallback。"""
         import re
-        if not self.hot_items:
+        items = self.hot_items or self._extract_items_from_report()
+        if not items:
             return None
 
-        # 阿拉伯数字：第1个、第12条
-        m = re.search(r'第\s*(\d+)\s*[个条位]?', user_msg)
+        # 也抓取 "热点N" / "第N条" / "第N个" / 中文数字 等写法
+        m = re.search(r'(?:热点\s*|第\s*)\s*(\d+)', user_msg)
+        if not m:
+            m = re.search(r'第\s*(\d+)\s*[个条位号]?', user_msg)
         if m:
             idx = int(m.group(1)) - 1
-            if 0 <= idx < len(self.hot_items):
+            if 0 <= idx < len(items):
                 return idx
 
         # 中文数字：第一条、第二位
-        m = re.search(r'第\s*([零一二两三四五六七八九十百千]+)\s*[个条位]?', user_msg)
+        m = re.search(r'第\s*([零一二两三四五六七八九十百千]+)\s*[个条位号]?', user_msg)
         if m:
             idx = self._chinese_to_int(m.group(1)) - 1
-            if 0 <= idx < len(self.hot_items):
+            if 0 <= idx < len(items):
                 return idx
 
         # 平台名：抖音那条、B站那个
-        for i, item in enumerate(self.hot_items):
+        for i, item in enumerate(items):
             platform = item.get("platform", "")
             if platform and platform in user_msg:
                 return i
 
         # 标题关键词：用户消息里有标题的部分文本
-        for i, item in enumerate(self.hot_items):
+        for i, item in enumerate(items):
             title = item.get("title", "")
             if title and len(title) >= 4:
                 # 取标题的任意连续4字，看是否出现在用户消息里
@@ -491,27 +539,28 @@ class ChatAgentWithMemory:
         """根据用户消息和热榜索引表，解析用户指的是哪条热点 → 返回该条目标题。
 
         支持格式：
-        - 阿拉伯数字：第1个、第12条、第3位
+        - 阿拉伯数字：第1个、第12条、第3位、热点6
         - 中文数字：第十二条、第三个、第二位
         """
         import re
+        items = self.hot_items or self._extract_items_from_report()
 
-        # 匹配 "第N个/条/位"（阿拉伯数字）
-        m = re.search(r'第\s*(\d+)\s*[个条位]?', user_msg)
-        if m and self.hot_items:
+        # 匹配 "热点N" / "第N个/条/位"（阿拉伯数字）
+        m = re.search(r'(?:热点\s*|第\s*)\s*(\d+)\s*[个条位号]?', user_msg)
+        if m and items:
             idx = int(m.group(1)) - 1
-            if 0 <= idx < len(self.hot_items):
-                return self.hot_items[idx].get("title", "")
+            if 0 <= idx < len(items):
+                return items[idx].get("title", "")
 
         # 匹配 "第N个/条/位"（中文数字）
-        m = re.search(r'第\s*([零一二两三四五六七八九十百千]+)\s*[个条位]?', user_msg)
-        if m and self.hot_items:
+        m = re.search(r'第\s*([零一二两三四五六七八九十百千]+)\s*[个条位号]?', user_msg)
+        if m and items:
             idx = self._chinese_to_int(m.group(1)) - 1
-            if 0 <= idx < len(self.hot_items):
-                return self.hot_items[idx].get("title", "")
+            if 0 <= idx < len(items):
+                return items[idx].get("title", "")
 
         # 匹配 "XX平台那条/那个"
-        for item in self.hot_items:
+        for item in items:
             platform = item.get("platform", "")
             if platform and platform in user_msg:
                 return item.get("title", "")

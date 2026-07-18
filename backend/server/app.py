@@ -461,6 +461,15 @@ async def chat(chat_request: ChatRequest):
     """
     try:
         logger.info(f"Received chat request with {len(chat_request.messages)} messages")
+        try:
+            with open("/tmp/endpoint_debug.log", "a", encoding="utf-8") as _f:
+                _f.write(f"[ENDPOINT /api/chat] report_len={len(chat_request.report or '')}, "
+                         f"hot_items={len(chat_request.hot_items) if chat_request.hot_items else 0}, "
+                         f"msg_count={len(chat_request.messages)}\n")
+                if chat_request.hot_items:
+                    _f.write(f"[ENDPOINT /api/chat] first_item={chat_request.hot_items[0].get('title','')[:50]}\n")
+        except Exception:
+            pass
 
         # Create chat agent with the report (and optional hot_items for hot-list follow-up)
         chat_agent = ChatAgentWithMemory(
@@ -589,6 +598,14 @@ async def research_report_chat(research_id: str, request: Request):
     try:
         # Get raw JSON data from request
         data = await request.json()
+        try:
+            with open("/tmp/endpoint_debug.log", "a", encoding="utf-8") as _f:
+                _f.write(f"[ENDPOINT /api/reports/{research_id}/chat] "
+                         f"report_len={len(data.get('report','') or '')}, "
+                         f"hot_items={len(data.get('hot_items',[]) or [])}, "
+                         f"msg_count={len(data.get('messages',[]) or [])}\n")
+        except Exception:
+            pass
 
         # Create chat agent with the report (and optional hot_items)
         chat_agent = ChatAgentWithMemory(

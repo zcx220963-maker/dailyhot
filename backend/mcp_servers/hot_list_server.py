@@ -49,16 +49,26 @@ def _get_platforms() -> list[tuple]:
         try:
             custom_list = json.loads(custom)
             platforms = []
+            # 建立内置 code→(name,limit,readable) 查找表，供 code-only 字符串引用
+            builtin_map = {p[0]: p for p in BUILTIN_PLATFORMS}
             for p in custom_list:
-                code = p.get("code", "")
-                name = p.get("name", code)
-                limit = p.get("limit", 30)
-                readable = p.get("readable", False)
+                # 支持两种形态: 纯字符串 code 或 完整字典
+                if isinstance(p, str):
+                    code = p
+                    if code in builtin_map:
+                        _, name, limit, readable = builtin_map[code]
+                    else:
+                        name, limit, readable = code, 30, False
+                else:
+                    code = p.get("code", "")
+                    name = p.get("name", code)
+                    limit = p.get("limit", 30)
+                    readable = p.get("readable", False)
                 platforms.append((code, name, limit, readable))
-                _register_fetch_route(code, p)
+                _register_fetch_route(code, p if isinstance(p, dict) else {"code": code})
             logger.info(f"从环境变量加载 {len(platforms)} 个自定义平台")
             return platforms
-        except json.JSONDecodeError as e:
+        except (json.JSONDecodeError, Exception) as e:
             logger.warning(f"HOT_PLATFORMS_JSON 解析失败: {e}，回退到内置平台")
     return BUILTIN_PLATFORMS
 

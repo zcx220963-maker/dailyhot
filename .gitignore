@@ -19,6 +19,9 @@ outputs/
 dist/
 gpt_researcher.egg-info/
 
+#Ignore runtime-generated report data
+backend/data/reports.json
+
 #Ignore my local docs
 my-docs/
 

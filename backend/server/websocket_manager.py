@@ -143,6 +143,11 @@ class WebSocketManager:
 
 async def run_agent(task, report_type, report_source, source_urls, document_urls, tone: Tone, websocket, stream_output=stream_output, headers=None, query_domains=[], config_path="", return_researcher=False, mcp_enabled=False, mcp_strategy="fast", mcp_configs=[], max_search_results=None, intent_result: dict = None, hot_platforms=None):
     """Run the agent."""
+    # stream_output 在 REST 路径 (websocket=None) 时为 None，替换成空操作避免崩溃
+    if stream_output is None:
+        async def stream_output(*args, **kwargs):
+            pass
+
     # Create logs handler for this research task
     logs_handler = CustomLogsHandler(websocket, task)
 
@@ -254,7 +259,7 @@ async def run_agent(task, report_type, report_source, source_urls, document_urls
         )
         report = await researcher.run()
 
-    if report_type not in ("multi_agents",) and return_researcher:
+    if report_type not in ("multi_agents", "hot_list_report") and return_researcher:
         return report, researcher.gpt_researcher
     else:
         return report
