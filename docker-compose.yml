@@ -21,6 +21,7 @@ services:
       http_proxy: ""
       https_proxy: ""
     volumes:
+      - ./backend:/app/backend:rw
       - ./my-docs:/app/my-docs:rw
       - ./outputs:/app/outputs:rw
       - ./logs:/app/logs:rw
