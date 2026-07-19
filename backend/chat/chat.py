@@ -210,99 +210,20 @@ class ChatAgentWithMemory:
         """保留接口兼容性，实际不再使用（改用 hot_items 直接定位）。"""
         return ""
 
-    # 违规域名黑名单（成人、赌博、垃圾站等）
-    _BLOCKED_DOMAINS = {
-        '51chigua', '51cg', 'hgyubxjlw', 'theporndude', 'pornhub',
-        'xvideos', 'xhamster', 'redtube', 'youporn', 'spankbang',
-        'chaturbate', 'onlyfans', 'fansly', 'manyvids',
-        'dmm', 'r18', 'javlibrary', 'avple', 'missav', 'supjav',
-        'tokyomotion', 'erome', 'pornpics', 'porngames', 'adult',
-        'xnxx', 'pornone', 'pornmd', 'thotvids', 'hentai',
-        'rule34', 'gelbooru', 'paheal', 'e621', 'hypnohub',
-        'camwhores', 'camstreams', 'stripchat', 'bongacams',
-        'livejasmin', 'myfreecams', 'camsoda', 'jerkmate',
-    }
-
-    # 违规关键词（中文 + 英文），检查标题和正文
-    _BLOCKED_KEYWORDS = [
-        # 中文
-        '口爆', '吞精', '做爱', '性爱', '裸聊', '约炮', '援交',
-        '强奸', '乱伦', '偷拍', '自慰', '情色', '成人视频',
-        'av女优', '三级片', '激情', '诱惑', '放荡',
-        # 英文
-        'porn', 'xxx', 'sex', 'nude', 'naked', 'escort',
-        'camgirl', 'onlyfans', 'nsfw', 'erotic', 'fetish',
-        'blowjob', 'handjob', 'creampie', 'dildo', 'vibrator',
-        'threesome', 'orgy', 'swinger', 'hardcore', 'softcore',
-    ]
-
-    def _is_blocked(self, url: str, title: str = "", body: str = "") -> bool:
-        """检查 URL、标题或正文是否包含违规内容。"""
-        from urllib.parse import urlparse
-        try:
-            host = (urlparse(url).hostname or "").lower()
-        except Exception:
-            host = ""
-        # 域名黑名单
-        for domain in self._BLOCKED_DOMAINS:
-            if domain in host:
-                return True
-        # 关键词过滤：同时检查标题 + 正文（DuckDuckGo body 摘要可能含成人内容）
-        text = f"{title or ''} {body or ''}".lower()
-        for kw in self._BLOCKED_KEYWORDS:
-            if kw in text:
-                return True
-        return False
-
-    def _sanitize_body(self, body: str) -> str:
-        """从正文摘要中移除包含违规关键词的句子。
-
-        DuckDuckGo body 有时会混入无关甚至违规的句子，直接截断可能丢有效内容，
-        按句子粒度清洗效果更好：只去掉命中关键词的句子，保留其余部分。
-        """
-        if not body:
-            return ""
-        import re
-        # 按句号/问号/感叹号分句（兼容中英文标点）
-        sentences = re.split(r'(?<=[。！？!?\n])', body)
-        cleaned = []
-        for sent in sentences:
-            sent_lower = sent.lower()
-            if any(kw in sent_lower for kw in self._BLOCKED_KEYWORDS):
-                continue
-            cleaned.append(sent)
-        result = "".join(cleaned).strip()
-        return result if result else ""
-
     def quick_search(self, query):
-        """Perform a web search for current information using DuckDuckGo"""
+        """DuckDuckGo 联网搜索（safesearch='on' 由引擎侧过滤违规内容）。"""
         try:
             logger.info(f"Performing DuckDuckGo search for: {query}")
             from ddgs import DDGS
-            # safesearch='on' 开启安全搜索，过滤成人内容
             raw = list(DDGS().text(query, region='cn-zh', max_results=8, safesearch='on'))
-            # 过滤违规结果（检查 URL + title + body 全文）
-            filtered = [
-                r for r in raw
-                if not self._is_blocked(
-                    r.get("href", ""),
-                    r.get("title", ""),
-                    r.get("body", ""),
-                )
-            ]
-            # 如果过滤后为空，静默返回空结果——查询本身没问题，只是搜索结果不干净
-            # 不报错，让 LLM 用已有的 hot_items 数据正常回答
-            if len(filtered) < 1 and len(raw) > 0:
-                logger.info(f"quick_search: {len(raw)} 条搜索结果均被安全过滤，跳过联网搜索: {query}")
-                return {"results": []}
             results = {
                 "results": [
                     {
                         "title": r.get("title", ""),
                         "url": r.get("href", ""),
-                        "content": self._sanitize_body(r.get("body", "")),
+                        "content": r.get("body", ""),
                     }
-                    for r in filtered[:5]
+                    for r in raw[:5]
                 ]
             }
             # Store search metadata for frontend
@@ -314,7 +235,7 @@ class ChatAgentWithMemory:
                         "url": r.get("href", ""),
                         "content": r.get("body", "")[:200] + "..." if len(r.get("body", "")) > 200 else r.get("body", ""),
                     }
-                    for r in filtered[:5]
+                    for r in raw[:5]
                 ],
             }
             return results
