@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { toast } from "react-hot-toast";
 import { markdownToHtml } from '../../helpers/markdownHelper';
 import { getHost } from '../../helpers/getHost';
@@ -25,21 +25,6 @@ interface ChatResponseProps {
 
 export default function ChatResponse({ answer, metadata }: ChatResponseProps) {
     const [htmlContent, setHtmlContent] = useState('');
-    const [showExportMenu, setShowExportMenu] = useState(false);
-    const exportMenuRef = useRef<HTMLDivElement>(null);
-
-    // 点击外部关闭下载菜单
-    useEffect(() => {
-        const handleClickOutside = (e: MouseEvent) => {
-            if (exportMenuRef.current && !exportMenuRef.current.contains(e.target as Node)) {
-                setShowExportMenu(false);
-            }
-        };
-        if (showExportMenu) {
-            document.addEventListener('mousedown', handleClickOutside);
-        }
-        return () => document.removeEventListener('mousedown', handleClickOutside);
-    }, [showExportMenu]);
     
     // Check if we have sources from a web search tool call
     const hasWebSources = metadata?.tool_calls?.some(
@@ -99,7 +84,7 @@ export default function ChatResponse({ answer, metadata }: ChatResponseProps) {
         }
     };
 
-    const exportAnswer = async (format: 'md' | 'pdf' | 'docx') => {
+    const downloadMd = async () => {
         const host = getHost();
         try {
             const res = await fetch(`${host}/api/chat/export`, {
@@ -107,43 +92,21 @@ export default function ChatResponse({ answer, metadata }: ChatResponseProps) {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     content: formattedAnswer,
-                    format,
+                    format: 'md',
                     filename: 'AI回复',
                 }),
             });
-
-            if (format === 'md') {
-                // MD 仍走 JSON → blob
-                if (!res.ok) {
-                    const err = await res.json().catch(() => ({}));
-                    throw new Error(err.error || `导出失败 (${res.status})`);
-                }
-                const { content, filename } = await res.json();
-                const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
-                triggerDownload(blob, `${filename || 'AI回复'}.md`);
-            } else {
-                // PDF / DOCX 现在直接返回文件流
-                if (!res.ok) {
-                    // 尝试解析 JSON 错误，否则用 statusText
-                    const err = await res.json().catch(() => ({}));
-                    throw new Error(err.error || `导出失败 (${res.status} ${res.statusText})`);
-                }
-                const blob = await res.blob();
-                if (!blob || blob.size === 0) {
-                    throw new Error('导出文件为空');
-                }
-                const disposition = res.headers.get('Content-Disposition') || '';
-                const match = disposition.match(/filename\*=UTF-8''([^;]+)/i)
-                    || disposition.match(/filename="?([^"]+)"?/i);
-                const fname = match
-                    ? decodeURIComponent(match[1])
-                    : `AI回复.${format}`;
-                triggerDownload(blob, fname);
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(err.error || `下载失败 (${res.status})`);
             }
-            toast.success(`已导出 ${format.toUpperCase()}`);
+            const { content, filename } = await res.json();
+            const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
+            triggerDownload(blob, `${filename || 'AI回复'}.md`);
+            toast.success('已下载 Markdown');
         } catch (err: any) {
-            console.error('Export failed:', err);
-            toast.error(err.message || '导出失败');
+            console.error('MD download failed:', err);
+            toast.error(err.message || '下载失败');
         }
     };
 
@@ -165,119 +128,24 @@ export default function ChatResponse({ answer, metadata }: ChatResponseProps) {
     return (
       <div className="container flex h-auto w-full shrink-0 gap-4 bg-black/30 backdrop-blur-md shadow-lg rounded-lg border border-solid border-gray-700/40 p-5">
         <div className="w-full">
-          <div className="flex items-center justify-between pb-3">
-            <div className="flex items-center gap-3">
-              <div className="flex items-center justify-center w-6 h-6 rounded-md bg-teal-500/20 border border-teal-500/30">
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-teal-400">
-                  <polyline points="20 6 9 17 4 12"></polyline>
-                </svg>
-              </div>
-              <h3 className="text-sm font-medium text-teal-200">回答</h3>
+          <div className="flex items-center gap-3 pb-3">
+            <div className="flex items-center justify-center w-6 h-6 rounded-md bg-teal-500/20 border border-teal-500/30">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-teal-400">
+                <polyline points="20 6 9 17 4 12"></polyline>
+              </svg>
             </div>
-            <div className="flex items-center gap-1">
-              <button
-                type="button"
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={copyToClipboard}
-                className="hover:opacity-80 transition-opacity duration-200 p-1"
-                aria-label="复制到剪贴板"
-                title="复制到剪贴板"
-              >
-                <img
-                  src="/img/copy-white.svg"
-                  alt="copy"
-                  width={20}
-                  height={20}
-                  className="cursor-pointer text-white"
-                />
-              </button>
-              <div className="relative" ref={exportMenuRef}>
-                <button
-                  type="button"
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => setShowExportMenu(!showExportMenu)}
-                  className="hover:opacity-80 transition-opacity duration-200 p-1 rounded text-gray-300 hover:text-white"
-                  aria-label="下载"
-                  title="下载"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                    <polyline points="7 10 12 15 17 10"></polyline>
-                    <line x1="12" y1="15" x2="12" y2="3"></line>
-                  </svg>
-                </button>
-                {showExportMenu && (
-                  <div
-                    className="absolute right-0 bottom-full mb-1 bg-gray-800 border border-gray-600 rounded-lg shadow-xl py-1 z-50 min-w-[140px]"
-                    onMouseDown={(e) => e.preventDefault()}
-                  >
-                    <button
-                      type="button"
-                      onClick={() => { exportAnswer('md'); setShowExportMenu(false); }}
-                      className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-200 hover:bg-gray-700 transition-colors"
-                    >
-                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-                        <polyline points="14 2 14 8 20 8"></polyline>
-                        <line x1="16" y1="13" x2="8" y2="13"></line>
-                        <line x1="16" y1="17" x2="8" y2="17"></line>
-                      </svg>
-                      Markdown
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => { exportAnswer('pdf'); setShowExportMenu(false); }}
-                      className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-200 hover:bg-gray-700 transition-colors"
-                    >
-                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-                        <polyline points="14 2 14 8 20 8"></polyline>
-                        <path d="M9 15l2 2 4-4"></path>
-                      </svg>
-                      PDF
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => { exportAnswer('docx'); setShowExportMenu(false); }}
-                      className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-200 hover:bg-gray-700 transition-colors"
-                    >
-                      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-                        <polyline points="14 2 14 8 20 8"></polyline>
-                        <line x1="16" y1="13" x2="8" y2="13"></line>
-                        <line x1="16" y1="17" x2="8" y2="17"></line>
-                      </svg>
-                      DOCX
-                    </button>
-                  </div>
-                )}
-              </div>
-              <button
-                type="button"
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={forwardToFeishu}
-                className="hover:opacity-80 transition-opacity duration-200 p-1 rounded text-gray-300 hover:text-white"
-                aria-label="转发到飞书"
-                title="转发到飞书"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"></path>
-                  <polyline points="16 6 12 2 8 6"></polyline>
-                  <line x1="12" y1="2" x2="12" y2="15"></line>
-                </svg>
-              </button>
-            </div>
+            <h3 className="text-sm font-medium text-teal-200">回答</h3>
           </div>
-          
+
           <div className="flex flex-wrap content-center items-center gap-[15px] pl-5 pr-5">
             <div className="w-full whitespace-pre-wrap text-base font-light leading-[152.5%] text-white log-message">
-              <div 
+              <div
                 className="markdown-content prose prose-invert max-w-none"
                 dangerouslySetInnerHTML={{ __html: htmlContent }}
               />
             </div>
           </div>
-          
+
           {/* Display web search sources if available */}
           {hasWebSources && webSources.length > 0 && (
             <div className="mt-4 pt-3 border-t border-gray-700/30">
@@ -294,7 +162,52 @@ export default function ChatResponse({ answer, metadata }: ChatResponseProps) {
               <Sources sources={webSources} compact={true} />
             </div>
           )}
+
+          {/* 操作按钮：回答左下角 */}
+          <div className="flex items-center gap-3 mt-4 pt-3 border-t border-gray-700/30">
+            <button
+              type="button"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={copyToClipboard}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs text-gray-300 hover:text-white bg-gray-800/60 hover:bg-gray-700 border border-gray-700 rounded transition-colors"
+              title="复制到剪贴板"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+              </svg>
+              复制
+            </button>
+            <button
+              type="button"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={downloadMd}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs text-gray-300 hover:text-white bg-gray-800/60 hover:bg-gray-700 border border-gray-700 rounded transition-colors"
+              title="下载 Markdown"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="7 10 12 15 17 10"></polyline>
+                <line x1="12" y1="15" x2="12" y2="3"></line>
+              </svg>
+              下载
+            </button>
+            <button
+              type="button"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={forwardToFeishu}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs text-gray-300 hover:text-white bg-gray-800/60 hover:bg-gray-700 border border-gray-700 rounded transition-colors"
+              title="转发到飞书"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"></path>
+                <polyline points="16 6 12 2 8 6"></polyline>
+                <line x1="12" y1="2" x2="12" y2="15"></line>
+              </svg>
+              转发飞书
+            </button>
+          </div>
         </div>
       </div>
     );
-} 
+}
