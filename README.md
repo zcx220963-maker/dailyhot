@@ -22,6 +22,7 @@
 - [使用示例](#使用示例)
 - [项目架构](#项目架构)
 - [核心设计](#核心设计)
+- [功能演进](#功能演进)
 - [环境变量](#环境变量)
 - [技术栈](#技术栈)
 - [开源协议](#开源协议)
@@ -389,6 +390,133 @@ ReAct agent 的工具列表只保留 `get_*` 和 `list_*` 前缀，排除 `gener
 - **嵌入**：OpenAI text-embedding-3-small（可选本地 HuggingFace 回退）
 - **搜索**：DuckDuckGo（免费，无需 API key）
 - **部署**：Docker、Docker Compose
+
+---
+
+## 功能演进
+
+DailyHot 是在 [gpt-researcher](https://github.com/assafelovic/gpt-researcher) 通用研究助手框架上、为“中文热榜分析”场景深度定型的项目。以下按时间线记录六大阶段的设计抉择、踩坑与修复。
+
+### 阶段 0：起点（gpt-researcher）
+
+原始框架提供：
+- 通用研究 agent（`GPTResearcher`）：搜索 → 抓取 → 嵌入 → 报告 → 追问
+- Next.js 前端 + FastAPI 后端 + WebSocket 流式推送
+- LangGraph ReAct 循环、工具调用、向量 RAG
+
+保留并复用的部分：WebSocket 流式推送骨架、`/api/reports` 持久化接口、前端 `useWebSocket` hook 与 `ReportStore` JSON 文件存储。从这里出发定制为垂直场景。
+
+---
+
+### 阶段 1：热榜抓取 + 跨平台匹配
+
+**目标**：让 LLM 分析“今日抖音前 20”，而不是一般性研究问题。
+
+新增：
+- **意图识别** — 前端传入自然语言 prompt，后端 `hot_list_agent`（ReAct agent + MCP）识别 `is_hot_list`、提取 `primary_codes`（主干平台列表）和 `category`。
+- **MCP server**（`hot_list_server.py`，stdio transport）— 把 DailyHotApi 各平台封装为 `get_all_hot_list(code, limit)` 工具，由 agent 调用，避免 LangChain 工具签名/并发问题。
+- **主干/辅助分层** — 主干平台按需求条数拉取（`primary_limit` = N），辅助平台固定 50 条做大池子供跨平台 `find_related` 匹配。原因：各平台排名不对齐，主干第 5 在辅助平台可能第 20+，小池子兜不住。
+- **find_related 算法改进** — embedding 余弦相似度（阈值从 0.5 调到 0.65，过滤“中专生高考” vs “DV磁带”这类弱相关） + 实体重合硬过滤（两条标题必须共享至少一个实体，jieba 优先、2-4 字滑动窗口兜底） → 取 top-2。
+
+---
+
+### 阶段 2：报告生成
+
+定制 `report_type/hot_list_report/HotListReport`：
+- 继承 `BaseReport` 接入 WebSocket 流式推送骨架，新增 `analyses` 字段存 `(platform, rank, title, hot, summary, related_links, url)` 七元组。
+- 并发 30 线程 `fetch_article_text` 抓正文 → LLM 摘要（`report_language=zh`）。
+- 跨域改写：辅助池匹配上的跨平台新闻，LLM 用原文摘要 + 实体重合硬过滤结果判定相关性，命中才写入 `related_links`。
+
+报告完成后，通过 `stream_output("report", "report_complete", report, ws, True, metadata={"hot_items": hot_items})` 把 `analyses` 结构化为 `metadata.hot_items` 数组推给前端。这是后续追问精准定位的数据源头。
+
+---
+
+### 阶段 3：追问精准定位
+
+**遇到的问题**：追问“第三条口播稿”时，后端只看到纯 markdown 文本，无从知道“第三条”指什么。
+
+**设计抉择**：不走“从报告文本解析第N个热点”（脆弱），改用“前端带结构化 state 给后端”：
+
+1. 后端 `report_complete` 推送 `metadata.hot_items`，前端 `useWebSocket` 回调捕获到 `hotItems` state。
+2. `handleChat(message)` 把 `{report, hot_items, messages}` 一并 POST 到 `/api/chat`。
+3. 后端 `ChatAgentWithMemory(report, hot_items)` 接收，`_resolve_target_index(latest_user_msg)` 解析“第N个”：
+   - 阿拉伯数字：`热点8`、`第3条`、`第12位`
+   - 中文数字：`热点八`、`第八条`、`第三`
+   - 平台名：`抖音那条`、`B站那个`
+   - 标题关键词：标题里任意连续 4 字出现在用户消息 → 走这条
+4. 能定位 → `_build_item_context(idx)` 取出 `title / url / summary / related_links` 作为上下文；定位不到 → RAG 全文检索兜底。
+5. 双路径内容 + 索引表 + 联网搜索结果 → 进 LLM system prompt。
+
+**踩坑**：
+- 中文数字解析最初只认 `第八`（“第”+中文数字），不支持 `热点八`（“热点”+中文数字） → 用户说“分析热点八”进入 None → RAG 兜底为空 → 联网搜索也搜不到 → LLM 返回“资料不足”。通过新增 `热点/第 + 中文数字 + [个条位号]?` 分支修复。
+- RAG 检索后端原本活跃，后改为仅做兜底空实现 `return ""`（报告全文已足够长，不需要切片）。后续维护要记得双路径里 RAG 路径已空。
+
+---
+
+### 阶段 4：联网搜索 + 安全过滤
+
+追问场景热点变化快（事件反转、官方回应、网友评论），报告生成时的分析已经过时，所以追问必须联网。
+
+**quick_search**（DuckDuckGo，免费无需 API key，`safesearch='on'`）：
+- 搜索目标标题（有定位时）或用户原始问题（定位不到时）
+- 过滤三层：域名黑名单（成人、赌博等 14 个） + 标题关键词过滤 + 正文逐句 `_sanitize_body` 清洗
+- 解析失败不抛错，返回空结果让 LLM 兜底用 hot_items 数据正常回答
+
+**踩坑**：搜索结果偶有成人内容混入。单独增加 `_sanitize_body`：按句号/感叹号/问号粒度去掉命中关键词的句子，保留其余部分，避免一刀切截断。
+
+---
+
+### 阶段 5：多格式导出 + 字体战争
+
+最初用 WeasyPrint + `md2pdf` 生成 PDF，依赖 `libgobject`，Debian slim 镜像里装不上。
+
+**PDF 渲染三阶段演化**：
+
+| 尝试 | 方案 | 失败原因 |
+|------|------|----------|
+| 1 | WeasyPrint (CSS→PDF) | 缺 libgobject，apt 装不上 |
+| 2 | md2pdf (轻量) | 同样依赖 Pango/Fontconfig 子系统 |
+| 3 | **fpdf2 + wqy-zenhei.ttc** | ✅ 纯 Python + TTF，不依赖系统图形栈 |
+
+fpdf2 接入后又踩三坑：
+- **字体找不到**：容器镜像里没装 `fonts-wqy-zenhei`。解决：Dockerfile 拆两个 apt-get RUN（工具组 + 字体组），再加 `/usr/share/fonts/**/*.ttc` 兜底扫描。
+- **`multi_cell(0, X)` 报 "Not enough horizontal space to render a single character"**：fpdf2 的 `multi_cell` 结束后默认把光标 X 移到页面右边界，下一段文字起笔时已在边缘外 → 渲染崩溃。解决：4 处 `multi_cell` 全部加 `new_x=XPos.LMARGIN, new_y=YPos.NEXT` 让每段回到左边距。
+- **前端 proxy 把二进制流当 JSON 解析**：Next.js proxy route 最初对 PDF/DOCX 也 `await response.json()` → "Unexpected token 'P'"。解决：按 `Content-Type` 分流（JSON 仍解析，其余 `arrayBuffer` → `Buffer` 透传），前端再加 `triggerDownload(blob, filename)` 用 `<a>.click()` 触发下载。
+
+DOCX 是 `python-docx + htmldocx`，Markdown → HTML → DOCX，CJK 和 emoji 直接由 docx 字体 fallback 处理。
+
+**最终决策**：PDF / DOCX 链路都已打通，但 Docker 内网路径跨域 + CJK 字体包体积问题对普通用户仍脆弱。**UI 现在只保留 Markdown 导出**（后端 `/api/chat/export` 仍支持完整三种格式，可通过 API 直接调用）。
+
+---
+
+### 阶段 6：持久化 + 环境踩坑
+
+**报告持久化**：
+- 后端 `ReportStore`：单文件 `backend/data/reports.json`（`{report_id: {question, answer, orderedData, chatMessages}}`），bind mount 到宿主机，容器重启/重建保留。
+- 前端：首次加载从 `/api/reports` 拉全量，写入 `localStorage.researchHistory` 作离线 fallback；每个追问通过 `POST /api/reports/{id}/chat` 同步到后端。
+
+**踩坑三连**：
+
+| 问题 | 根因 | 修复 |
+|------|------|------|
+| PDF/DOCX 下载 HTTP 500 | `.env.local` `NEXT_PUBLIC_GPTR_API_URL=http://localhost:8001` 覆盖了 docker-compose 设对的 `http://backend:8001`，前端容器里 `localhost` 指自己 | 删 `.env.local` 覆盖，compose `environment:` 自然生效 |
+| 历史“丢”了 | `useResearchHistory` 只在 localStorage 有记录时才 fetch 后端；清缓存/换端口/隐身 → localStorage 空 → 不请求服务端 | 始终先 GET `/api/reports` 全量；服务端挂了才 fallback localStorage |
+| 容器重启后数据消失(假象) | bind mount 路径含单引号(`xu'zhi'cheng`)时 Git Bash 的 `${PWD}` 偶有解析异常 | 后端实际落盘成功，数据仍在，前端展示层见上 |
+
+---
+
+### 阶段 7：UI 收敛
+
+最近的 UI 整理：
+- 删除 PDF / DOCX 导出按钮（脆弱度高、中文字体包重），聊天回答保留 Markdown 下载。
+- 复制 / 下载 / 转发飞按钮从回答右上角移到回答文本左下角，便于单手触达。
+- 下载按钮不再弹出三级菜单，直接一键下载 `.md`。
+
+---
+
+### 当前状态（代码整洁度）
+
+近 6 次 commit 都是 bug fix，没有新功能加入。所有 fix 都 push 到 `main`，仓库历史线性、无其他分支。敏感文件（`.env`、`cookies.txt`、`reports.json`）已 `.gitignore`。
 
 ---
 
