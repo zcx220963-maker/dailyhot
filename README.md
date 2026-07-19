@@ -329,7 +329,7 @@ B站前15，每条详细分析
 
 搜索结果过滤三层：
 - DuckDuckGo `safesearch='on'` 开启安全搜索
-- 域名黑名单（成人、赌博等 14 个域名）
+- 域名黑名单（成人、赌博等多个域名）
 - 标题关键词过滤（中英文违规词）
 
 ### 7. 中文数字解析
@@ -459,7 +459,7 @@ DailyHot 是在 [gpt-researcher](https://github.com/assafelovic/gpt-researcher) 
 
 **quick_search**（DuckDuckGo，免费无需 API key，`safesearch='on'`）：
 - 搜索目标标题（有定位时）或用户原始问题（定位不到时）
-- 过滤三层：域名黑名单（成人、赌博等 14 个） + 标题关键词过滤 + 正文逐句 `_sanitize_body` 清洗
+- 过滤三层：域名黑名单（成人、赌博等多个） + 标题关键词过滤 + 正文逐句 `_sanitize_body` 清洗
 - 解析失败不抛错，返回空结果让 LLM 兜底用 hot_items 数据正常回答
 
 **踩坑**：搜索结果偶有成人内容混入。单独增加 `_sanitize_body`：按句号/感叹号/问号粒度去掉命中关键词的句子，保留其余部分，避免一刀切截断。
@@ -476,7 +476,7 @@ DailyHot 是在 [gpt-researcher](https://github.com/assafelovic/gpt-researcher) 
 |------|------|----------|
 | 1 | WeasyPrint (CSS→PDF) | 缺 libgobject，apt 装不上 |
 | 2 | md2pdf (轻量) | 同样依赖 Pango/Fontconfig 子系统 |
-| 3 | **fpdf2 + wqy-zenhei.ttc** | ✅ 纯 Python + TTF，不依赖系统图形栈 |
+| 3 | **fpdf2 + wqy-zenhei.ttc** |  纯 Python + TTF，不依赖系统图形栈 |
 
 fpdf2 接入后又踩三坑：
 - **字体找不到**：容器镜像里没装 `fonts-wqy-zenhei`。解决：Dockerfile 拆两个 apt-get RUN（工具组 + 字体组），再加 `/usr/share/fonts/**/*.ttc` 兜底扫描。
