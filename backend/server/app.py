@@ -782,6 +782,7 @@ def _render_pdf_to_bytes(content: str) -> bytes:
     纯同步函数，由 run_in_executor 调用。
     """
     from fpdf import FPDF
+    from fpdf.enums import XPos, YPos
     from pathlib import Path
     import re
 
@@ -822,22 +823,22 @@ def _render_pdf_to_bytes(content: str) -> bytes:
             pdf.ln(3)
             continue
         if line.startswith("# "):
-            pdf.set_font(*body_font); pdf.set_font("cn" if font_path else "Helvetica", "B", 16)
-            pdf.multi_cell(0, 8, line[2:].strip())
+            pdf.set_font("cn" if font_path else "Helvetica", "B", 16)
+            pdf.multi_cell(0, 8, line[2:].strip(), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
             pdf.ln(2)
         elif line.startswith("## "):
             pdf.set_font("cn" if font_path else "Helvetica", "B", 13)
-            pdf.multi_cell(0, 7, line[3:].strip())
+            pdf.multi_cell(0, 7, line[3:].strip(), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
             pdf.ln(1)
         elif line.startswith(("### ", "- ", "* ")):
             txt = line.lstrip("#* ").strip()
             pdf.set_font(*body_font)
-            pdf.multi_cell(0, 6, f"• {txt}")
+            pdf.multi_cell(0, 6, txt, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         else:
             # 行内 **bold** 简化为纯文本（fpdf2 不支持行内富文本，按普通行处理）
             txt = re.sub(r'\*\*(.+?)\*\*', r'\1', line)
             pdf.set_font(*body_font)
-            pdf.multi_cell(0, 6, txt)
+            pdf.multi_cell(0, 6, txt, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
     return pdf.output()
 
