@@ -17,47 +17,49 @@ export const useResearchHistory = () => {
 
     const fetchHistory = async () => {
       try {
-        console.log('Fetching research history from server...');
-        // First, load data from localStorage for immediate display
-        const localHistory = loadFromLocalStorage();
-        
-        // Set local history immediately to show something to user
-        if (localHistory && localHistory.length > 0) {
-          setHistory(localHistory);
-        }
-        
-        // Then try to fetch from server, but only for items we have locally
-        if (localHistory && localHistory.length > 0) {
-          // Extract IDs from local history to filter server results
-          const localIds = localHistory.map((item: ResearchHistoryItem) => item.id).join(',');
-          console.log(`Sending ${localHistory.length} local IDs to server for filtering`);
-          
-          const response = await fetch(`/api/reports?report_ids=${localIds}`);
-          if (response.ok) {
-            const data = await response.json();
-            
-            // Check if the response has the expected structure
-            if (data.reports && Array.isArray(data.reports)) {
-              console.log('Loaded research history from server:', data.reports.length, 'items');
-              
-              // Merge local and server history
-              await syncLocalHistoryWithServer(localHistory, data.reports);
-            } else {
-              console.warn('Server response did not contain reports array', data);
-              // Keep using the local history we already loaded
-            }
+        console.log('Fetching all research history from server...');
+        // 始终从服务端拉全量报告列表，localStorage 仅作离线 fallback
+        const response = await fetch(`/api/reports`);
+        if (response.ok) {
+          const data = await response.json();
+          const serverReports = (data.reports && Array.isArray(data.reports))
+            ? data.reports
+            : (Array.isArray(data) ? data : []);
+
+          if (serverReports.length > 0) {
+            console.log('Loaded research history from server:', serverReports.length, 'items');
+            // 按时间倒序
+            const sorted = serverReports.sort((a: ResearchHistoryItem, b: ResearchHistoryItem) =>
+              (b.timestamp || 0) - (a.timestamp || 0)
+            );
+            setHistory(sorted);
+            // 同步到 localStorage 作为下次离线 fallback
+            localStorage.setItem('researchHistory', JSON.stringify(sorted));
           } else {
-            console.warn('Failed to load history from server, status:', response.status);
-            // We're already using local history from above
+            // 服务端也没数据 → 回退到 localStorage
+            console.log('No reports on server, falling back to localStorage');
+            const localHistory = loadFromLocalStorage();
+            if (localHistory && localHistory.length > 0) {
+              setHistory(localHistory);
+            }
           }
         } else {
-          console.log('No local history found, skipping server fetch');
+          console.warn('Failed to load history from server, status:', response.status);
+          // 网络也挂了 → 回退到 localStorage
+          const localHistory = loadFromLocalStorage();
+          if (localHistory && localHistory.length > 0) {
+            setHistory(localHistory);
+          }
         }
       } catch (error) {
         console.error('Error fetching research history:', error);
-        // We're already using local history from above
+        // 异常兜底: 用 localStorage
+        const localHistory = loadFromLocalStorage();
+        if (localHistory && localHistory.length > 0) {
+          setHistory(localHistory);
+        }
       } finally {
-        dataLoadedRef.current = true; // Mark data as loaded
+        dataLoadedRef.current = true;
         setLoading(false);
       }
     };
